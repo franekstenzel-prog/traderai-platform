@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}TraderAI — Cennik{% endblock %}
+{% block content %}
+<section class="section">
+  <div class="section__head">
+    <h1>Cennik</h1>
+    <p class="muted">W tej wersji zmiana planu jest w trybie demo (bez płatności).</p>
+  </div>
+
+  <div class="grid3">
+    <div class="card card--price">
+      <div class="price__name">Free</div>
+      <div class="price__value">0 zł</div>
+      <div class="muted">3 analizy / miesiąc</div>
+      <a class="btn btn--ghost w100" href="{{ url_for('signup') }}">Załóż konto</a>
+    </div>
+
+    <div class="card card--price card--highlight">
+      <div class="price__name">Pro</div>
+      <div class="price__value">{{ PRO_PRICE_MONTHLY_PLN }} zł <span class="muted">/ mies.</span></div>
+      <div class="muted">Nielimitowane analizy</div>
+      <a class="btn btn--primary w100" href="{{ url_for('signup') }}">Start</a>
+    </div>
+
+    <div class="card card--price">
+      <div class="price__name">Pro (rocznie)</div>
+      <div class="price__value">{{ PRO_PRICE_YEARLY_PLN }} zł <span class="muted">/ rok</span></div>
+      <div class="muted">-10% vs 12× miesięczny</div>
+      <a class="btn btn--ghost w100" href="{{ url_for('signup') }}">Start</a>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h3>Co dalej</h3>
+    <p class="muted">Następny etap: Stripe + webhooki + automatyczna zmiana planu po płatności.</p>
+  </div>
+</section>
+{% endblock %}

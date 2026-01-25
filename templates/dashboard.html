@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}TraderAI — Dashboard{% endblock %}
+{% block content %}
+<section class="dash">
+  <aside class="sidebar card">
+    <div class="sidebar__top">
+      <div class="sidebar__title">Dashboard</div>
+      <div class="muted">{{ user['email'] }}</div>
+    </div>
+
+    <div class="kpi">
+      <div class="kpi__row">
+        <span class="muted">Plan</span>
+        <span class="mono">{{ user['plan'] }}</span>
+      </div>
+      <div class="kpi__row">
+        <span class="muted">Zużycie</span>
+        <span class="mono">{{ used }}{% if limit %}/{{ limit }}{% endif %}</span>
+      </div>
+      <div class="kpi__row">
+        <span class="muted">Pozostało</span>
+        <span class="mono">{{ remaining }}</span>
+      </div>
+    </div>
+
+    <form method="post" action="{{ url_for('set_plan') }}" class="form" style="margin-top:12px">
+      <label>Zmiana planu (demo)</label>
+      <select name="plan">
+        <option value="free" {% if user['plan']=='free' %}selected{% endif %}>Free (0 zł)</option>
+        <option value="pro_monthly" {% if user['plan']=='pro_monthly' %}selected{% endif %}>Pro ({{ PRO_PRICE_MONTHLY_PLN }} zł/mies.)</option>
+        <option value="pro_yearly" {% if user['plan']=='pro_yearly' %}selected{% endif %}>Pro rocznie ({{ PRO_PRICE_YEARLY_PLN }} zł/rok)</option>
+      </select>
+      <button class="btn btn--ghost w100" type="submit">Zapisz</button>
+    </form>
+
+    <div class="divider"></div>
+    <div class="muted small">W tej wersji analiza jest demo (licznik). Kolejny etap: upload wykresu + OpenAI.</div>
+  </aside>
+
+  <div class="dash__main">
+    <div class="card">
+      <div class="dashhead">
+        <div>
+          <h1>Analiza trade’u</h1>
+          <p class="muted">Kliknij, aby dodać “analizę” (demo). Limit Free: {{ FREE_MONTHLY_LIMIT }}/mies.</p>
+        </div>
+        <form method="post" action="{{ url_for('analyze') }}">
+          <button class="btn btn--primary" type="submit">Dodaj analizę</button>
+        </form>
+      </div>
+
+      <div class="chartbox">
+        <img src="{{ url_for('static', filename='images/hero_chart.svg') }}" alt="Wykres demo" />
+      </div>
+
+      <div class="grid3" style="margin-top:16px">
+        <div class="card card--inset">
+          <div class="muted">Jakość wejścia</div>
+          <div class="big">B+</div>
+        </div>
+        <div class="card card--inset">
+          <div class="muted">Ryzyko</div>
+          <div class="big">Średnie</div>
+        </div>
+        <div class="card card--inset">
+          <div class="muted">Rekomendacja</div>
+          <div class="big">Czekać na retest</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}
