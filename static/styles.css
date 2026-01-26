@@ -238,3 +238,17 @@ input:focus,select:focus{border-color: rgba(232,179,76,.35)}
   .dash{grid-template-columns:1fr}
   .nav{display:none}
 }
+
+
+/* --- New UI helpers --- */
+.img-preview{
+  width:100%;
+  height:auto;
+  margin-top:10px;
+  border-radius:16px;
+  border:1px solid rgba(255,255,255,.08);
+  background: rgba(0,0,0,.2);
+}
+.breadcrumbs{
+  margin-top: 10px;
+}

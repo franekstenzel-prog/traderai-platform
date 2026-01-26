@@ -13,61 +13,162 @@
         <span class="muted">Plan</span>
         <span class="mono">{{ user['plan'] }}</span>
       </div>
+
+      {% if user['plan'] != 'free' %}
       <div class="kpi__row">
-        <span class="muted">Zużycie</span>
-        <span class="mono">{{ used }}{% if limit %}/{{ limit }}{% endif %}</span>
+        <span class="muted">Status</span>
+        <span class="mono">{{ user['stripe_status'] or '—' }}</span>
       </div>
+      {% endif %}
+
+      <div class="kpi__row">
+        <span class="muted">Analizy (ten miesiąc)</span>
+        <span class="mono">{{ user['analyses_used'] }}</span>
+      </div>
+
+      {% if remaining is not none %}
       <div class="kpi__row">
         <span class="muted">Pozostało</span>
         <span class="mono">{{ remaining }}</span>
       </div>
+      {% endif %}
+
+      <div class="kpi__hint muted">
+        Free: {{ FREE_MONTHLY_LIMIT }}/mies. • Pro: nielimitowane
+      </div>
     </div>
 
-    <form method="post" action="{{ url_for('set_plan') }}" class="form" style="margin-top:12px">
-      <label>Zmiana planu (demo)</label>
-      <select name="plan">
-        <option value="free" {% if user['plan']=='free' %}selected{% endif %}>Free (0 zł)</option>
-        <option value="pro_monthly" {% if user['plan']=='pro_monthly' %}selected{% endif %}>Pro ({{ PRO_PRICE_MONTHLY_PLN }} zł/mies.)</option>
-        <option value="pro_yearly" {% if user['plan']=='pro_yearly' %}selected{% endif %}>Pro rocznie ({{ PRO_PRICE_YEARLY_PLN }} zł/rok)</option>
-      </select>
-      <button class="btn btn--ghost w100" type="submit">Zapisz</button>
-    </form>
+    <div class="sidebar__actions">
+      <a class="btn btn--ghost" href="{{ url_for('pricing') }}">Cennik / Upgrade</a>
+      {% if user['stripe_customer_id'] %}
+        <a class="btn btn--ghost" href="{{ url_for('billing_portal') }}">Zarządzaj subskrypcją</a>
+      {% endif %}
+      <a class="btn btn--ghost" href="{{ url_for('logout') }}">Wyloguj</a>
+    </div>
 
-    <div class="divider"></div>
-    <div class="muted small">W tej wersji analiza jest demo (licznik). Kolejny etap: upload wykresu + OpenAI.</div>
+    <div class="card card--inset" style="margin-top:14px">
+      <div class="muted" style="margin-bottom:8px">Ostatnie analizy</div>
+      {% if recent and recent|length %}
+        <div class="list">
+          {% for r in recent %}
+            <a class="list__row" href="{{ url_for('analysis_view', analysis_id=r['id']) }}">
+              <span class="mono">{{ r['pair'] }} • {{ r['timeframe'] }}</span>
+              <span class="muted">{{ r['created_at'][:10] }}</span>
+            </a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="muted">Brak historii.</div>
+      {% endif %}
+    </div>
   </aside>
 
   <div class="dash__main">
     <div class="card">
-      <div class="dashhead">
-        <div>
-          <h1>Analiza trade’u</h1>
-          <p class="muted">Kliknij, aby dodać “analizę” (demo). Limit Free: {{ FREE_MONTHLY_LIMIT }}/mies.</p>
-        </div>
-        <form method="post" action="{{ url_for('analyze') }}">
-          <button class="btn btn--primary" type="submit">Dodaj analizę</button>
-        </form>
+      <div class="card__title">Analiza screena</div>
+      <div class="muted" style="margin-bottom:12px">
+        Wgraj screen wykresu. Dostaniesz: setup, entry, SL, TP, wielkość pozycji i krótkie uzasadnienie.
       </div>
 
-      <div class="chartbox">
-        <img src="{{ url_for('static', filename='images/hero_chart.svg') }}" alt="Wykres demo" />
-      </div>
+      {% if not openai_enabled %}
+        <div class="toast toast--error">
+          Brak konfiguracji OpenAI (OPENAI_API_KEY). Analizy są chwilowo niedostępne.
+        </div>
+      {% endif %}
 
-      <div class="grid3" style="margin-top:16px">
-        <div class="card card--inset">
-          <div class="muted">Jakość wejścia</div>
-          <div class="big">B+</div>
+      <form class="form" action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data">
+        <div class="grid3">
+          <label class="field">
+            <span class="field__label">Para</span>
+            <input name="pair" value="{{ user['default_pair'] or 'BTCUSDT' }}" placeholder="np. BTCUSDT" required />
+          </label>
+
+          <label class="field">
+            <span class="field__label">Interwał</span>
+            <input name="timeframe" value="{{ user['default_timeframe'] or '1H' }}" placeholder="np. 15M / 1H / 4H" required />
+          </label>
+
+          <label class="field">
+            <span class="field__label">Kapitał</span>
+            <input name="capital" value="{{ user['default_capital'] or 1000 }}" inputmode="decimal" placeholder="np. 10000" required />
+          </label>
         </div>
-        <div class="card card--inset">
-          <div class="muted">Ryzyko</div>
-          <div class="big">Średnie</div>
+
+        <div class="grid3" style="margin-top:10px">
+          <label class="field">
+            <span class="field__label">Ryzyko na trade</span>
+            <input name="risk_fraction" value="{{ user['default_risk_fraction'] or 0.02 }}" inputmode="decimal" placeholder="np. 0.02 = 2%" required />
+            <span class="field__hint muted">Podaj jako część kapitału (0.02 = 2%).</span>
+          </label>
+
+          <label class="field">
+            <span class="field__label">Screen (PNG/JPG/WEBP)</span>
+            <input name="chart" type="file" accept=".png,.jpg,.jpeg,.webp" required />
+          </label>
+
+          <div class="field">
+            <span class="field__label">Akcja</span>
+            <button class="btn btn--primary" type="submit" {% if not openai_enabled %}disabled{% endif %}>Analizuj</button>
+            <span class="field__hint muted">Limit Free: {{ FREE_MONTHLY_LIMIT }}/miesiąc.</span>
+          </div>
         </div>
-        <div class="card card--inset">
-          <div class="muted">Rekomendacja</div>
-          <div class="big">Czekać na retest</div>
-        </div>
-      </div>
+      </form>
     </div>
+
+    {% if last %}
+      {% set result = last['result_json'] | loads %}
+      <div class="card" style="margin-top:16px">
+        <div class="card__title">Ostatnia analiza</div>
+
+        <div class="grid2">
+          <div class="card card--inset">
+            <div class="mono">{{ result.pair }} • {{ result.timeframe }} • {{ result.bias }}</div>
+            <div class="muted" style="margin-top:6px">{{ result.setup }}</div>
+            <div style="margin-top:12px" class="grid2">
+              <div>
+                <div class="muted">Entry</div>
+                <div class="big">{{ result.entry }}</div>
+              </div>
+              <div>
+                <div class="muted">Stop-loss</div>
+                <div class="big">{{ result.stop_loss }}</div>
+              </div>
+            </div>
+
+            <div style="margin-top:12px">
+              <div class="muted">Take-profit</div>
+              <div class="mono">
+                {% for tp in result.take_profit %}
+                  <span class="pill">{{ tp }}</span>
+                {% endfor %}
+              </div>
+            </div>
+
+            <div style="margin-top:12px">
+              <div class="muted">Wielkość pozycji</div>
+              <div class="mono">{{ result.position_size }}</div>
+            </div>
+
+            <div style="margin-top:12px">
+              <div class="muted">Ryzyko / invalidation</div>
+              <div class="mono">{{ result.risk }}</div>
+            </div>
+          </div>
+
+          <div class="card card--inset">
+            <div class="muted">Wyjaśnienie</div>
+            <div style="margin-top:8px; white-space: pre-line">{{ result.explanation }}</div>
+
+            <div class="muted" style="margin-top:14px">Podgląd screena</div>
+            <img class="img-preview" src="data:{{ last['image_mime'] }};base64,{{ last['image_b64'] }}" alt="Wgrany screen" />
+          </div>
+        </div>
+
+        <div class="muted" style="margin-top:10px">
+          Uwaga: To narzędzie ma charakter edukacyjny i nie stanowi porady inwestycyjnej.
+        </div>
+      </div>
+    {% endif %}
   </div>
 </section>
 {% endblock %}

@@ -1,38 +1,85 @@
 {% extends "base.html" %}
 {% block title %}TraderAI — Cennik{% endblock %}
 {% block content %}
-<section class="section">
-  <div class="section__head">
-    <h1>Cennik</h1>
-    <p class="muted">W tej wersji zmiana planu jest w trybie demo (bez płatności).</p>
+<section class="container">
+  <div class="hero hero--small">
+    <div>
+      <h1>Cennik</h1>
+      <p class="muted">Wybierz plan. Free ma limit analiz. Pro odblokowuje nielimitowane analizy.</p>
+    </div>
   </div>
 
-  <div class="grid3">
-    <div class="card card--price">
+  <div class="pricing">
+    <div class="card price">
       <div class="price__name">Free</div>
       <div class="price__value">0 zł</div>
-      <div class="muted">3 analizy / miesiąc</div>
-      <a class="btn btn--ghost w100" href="{{ url_for('signup') }}">Załóż konto</a>
+      <div class="muted">Dla startu</div>
+      <ul class="price__list">
+        <li>{{ FREE_MONTHLY_LIMIT }} analizy / miesiąc</li>
+        <li>Dashboard + historia analiz</li>
+        <li>Bez karty</li>
+      </ul>
+
+      {% if user %}
+        <a class="btn btn--ghost" href="{{ url_for('dashboard') }}">Przejdź do dashboardu</a>
+      {% else %}
+        <a class="btn btn--ghost" href="{{ url_for('signup') }}">Załóż konto</a>
+      {% endif %}
     </div>
 
-    <div class="card card--price card--highlight">
+    <div class="card price price--featured">
       <div class="price__name">Pro</div>
       <div class="price__value">{{ PRO_PRICE_MONTHLY_PLN }} zł <span class="muted">/ mies.</span></div>
       <div class="muted">Nielimitowane analizy</div>
-      <a class="btn btn--primary w100" href="{{ url_for('signup') }}">Start</a>
+      <ul class="price__list">
+        <li>Nielimitowane analizy</li>
+        <li>Priorytetowe przetwarzanie</li>
+        <li>Zarządzanie subskrypcją</li>
+      </ul>
+
+      {% if user %}
+        {% if stripe_enabled %}
+          <form method="post" action="{{ url_for('billing_checkout') }}">
+            <input type="hidden" name="plan" value="pro_monthly">
+            <button class="btn btn--primary" type="submit">Kup miesięczny</button>
+          </form>
+        {% else %}
+          <div class="toast toast--error">Stripe nie jest jeszcze skonfigurowany.</div>
+        {% endif %}
+      {% else %}
+        <a class="btn btn--primary" href="{{ url_for('login') }}">Zaloguj, aby kupić</a>
+      {% endif %}
     </div>
 
-    <div class="card card--price">
-      <div class="price__name">Pro (rocznie)</div>
+    <div class="card price">
+      <div class="price__name">Pro (Roczny)</div>
       <div class="price__value">{{ PRO_PRICE_YEARLY_PLN }} zł <span class="muted">/ rok</span></div>
-      <div class="muted">-10% vs 12× miesięczny</div>
-      <a class="btn btn--ghost w100" href="{{ url_for('signup') }}">Start</a>
+      <div class="muted">-10% vs. 12×{{ PRO_PRICE_MONTHLY_PLN }} zł</div>
+      <ul class="price__list">
+        <li>Nielimitowane analizy</li>
+        <li>Najlepsza cena</li>
+        <li>Zarządzanie subskrypcją</li>
+      </ul>
+
+      {% if user %}
+        {% if stripe_enabled %}
+          <form method="post" action="{{ url_for('billing_checkout') }}">
+            <input type="hidden" name="plan" value="pro_yearly">
+            <button class="btn btn--ghost" type="submit">Kup roczny</button>
+          </form>
+        {% else %}
+          <div class="toast toast--error">Stripe nie jest jeszcze skonfigurowany.</div>
+        {% endif %}
+      {% else %}
+        <a class="btn btn--ghost" href="{{ url_for('login') }}">Zaloguj, aby kupić</a>
+      {% endif %}
     </div>
   </div>
 
-  <div class="card" style="margin-top:16px">
-    <h3>Co dalej</h3>
-    <p class="muted">Następny etap: Stripe + webhooki + automatyczna zmiana planu po płatności.</p>
+  <div class="card card--inset" style="margin-top:18px">
+    <div class="muted">
+      Płatności obsługuje Stripe. Subskrypcją możesz zarządzać z poziomu panelu (Dashboard → Zarządzaj subskrypcją).
+    </div>
   </div>
 </section>
 {% endblock %}

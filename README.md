@@ -1,25 +1,44 @@
-# TraderAI Platform — clean starter
+# TraderAI Platform
 
-Minimalistyczny starter platformy AI dla traderów:
-- Landing (slider "Jak działa", funkcje, cennik, FAQ)
-- Rejestracja / logowanie (SQLite: `app.db`)
-- Dashboard: licznik analiz (Free: 3/miesiąc, Pro: nielimitowane)
-- Logo + favicon (SVG)
+Flask + SQLite + Stripe Subscriptions + OpenAI Vision (chart screenshot → plan transakcyjny).
 
-## Lokalnie (PowerShell)
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-$env:SECRET_KEY="wstaw_tu_losowy_secret"
-python app.py
-```
-Otwórz: http://localhost:10000
+## Funkcje
+- Rejestracja / logowanie
+- Dashboard (upload screena + parametry: para / interwał / kapitał / ryzyko)
+- Limity: Free = 3 analizy / miesiąc, Pro = nielimitowane
+- Stripe: subskrypcja miesięczna i roczna + Customer Portal
+- OpenAI: analiza screena i zwrot planu (entry, SL, TP, sizing, ryzyko)
+
+## Wymagane zmienne środowiskowe (Render → Environment)
+
+### Flask
+- `SECRET_KEY` – losowy długi string (ważne!)
+
+### OpenAI
+- `OPENAI_API_KEY` – klucz z OpenAI
+- `OPENAI_MODEL` – opcjonalnie (domyślnie: `gpt-4o-mini`)
+
+### Stripe (subskrypcje)
+- `STRIPE_SECRET_KEY`
+- `STRIPE_PUBLISHABLE_KEY` (opcjonalne – UI)
+- `STRIPE_WEBHOOK_SECRET`
+- `STRIPE_PRICE_MONTHLY` – Price ID dla planu miesięcznego (99 PLN)
+- `STRIPE_PRICE_YEARLY` – Price ID dla planu rocznego (12×99 PLN - 10%)
+
+## Webhook Stripe
+W Stripe ustaw endpoint webhook:
+- URL: `https://<twoj-render-url>/stripe/webhook`
+- Events (minimum):
+  - `checkout.session.completed`
+  - `customer.subscription.created`
+  - `customer.subscription.updated`
+  - `customer.subscription.deleted`
+
+Skopiuj `Signing secret` do `STRIPE_WEBHOOK_SECRET`.
 
 ## Render
-- Build Command: `pip install -r requirements.txt`
-- Start Command: `gunicorn -b 0.0.0.0:$PORT app:app`
-- ENV:
-  - `SECRET_KEY` = losowy długi string
+- Build command: `pip install -r requirements.txt`
+- Start command: `gunicorn app:app`
 
-> Uwaga: to jest wersja DEMO (bez płatności i bez OpenAI). Kolejny krok: upload wykresu + integracja OpenAI.
+## Uwaga
+Wynik analizy ma charakter edukacyjny i nie stanowi porady inwestycyjnej.

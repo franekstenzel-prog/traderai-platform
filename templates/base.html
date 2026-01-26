@@ -6,14 +6,14 @@
   <meta name="theme-color" content="#0B0E14" />
   <title>{% block title %}TraderAI{% endblock %}</title>
 
-  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='images/logo.svg') }}">
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename='images/favicon.png') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
   <header class="topbar">
     <div class="container topbar__inner">
       <a class="brand" href="{{ url_for('index') }}">
-        <img class="brand__logo" src="{{ url_for('static', filename='images/logo.svg') }}" alt="TraderAI" width="32" height="32">
+        <img class="brand__logo" src="{{ url_for('static', filename='images/logo.png') }}" alt="TraderAI" width="32" height="32">
         <span class="brand__name">TraderAI</span>
       </a>
 

@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}TraderAI — Analiza{% endblock %}
+{% block content %}
+<section class="container">
+  <div class="breadcrumbs">
+    <a class="muted" href="{{ url_for('dashboard') }}">← Dashboard</a>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <div class="card__title">Analiza #{{ row['id'] }}</div>
+    <div class="muted">{{ row['created_at'] }}</div>
+
+    <div class="grid2" style="margin-top:14px">
+      <div class="card card--inset">
+        <div class="mono">{{ result.pair }} • {{ result.timeframe }} • {{ result.bias }}</div>
+        <div class="muted" style="margin-top:6px">{{ result.setup }}</div>
+
+        <div style="margin-top:12px" class="grid2">
+          <div>
+            <div class="muted">Entry</div>
+            <div class="big">{{ result.entry }}</div>
+          </div>
+          <div>
+            <div class="muted">Stop-loss</div>
+            <div class="big">{{ result.stop_loss }}</div>
+          </div>
+        </div>
+
+        <div style="margin-top:12px">
+          <div class="muted">Take-profit</div>
+          <div class="mono">
+            {% for tp in result.take_profit %}
+              <span class="pill">{{ tp }}</span>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div style="margin-top:12px">
+          <div class="muted">Wielkość pozycji</div>
+          <div class="mono">{{ result.position_size }}</div>
+        </div>
+
+        <div style="margin-top:12px">
+          <div class="muted">Ryzyko / invalidation</div>
+          <div class="mono">{{ result.risk }}</div>
+        </div>
+      </div>
+
+      <div class="card card--inset">
+        <div class="muted">Wyjaśnienie</div>
+        <div style="margin-top:8px; white-space: pre-line">{{ result.explanation }}</div>
+
+        <div class="muted" style="margin-top:14px">Podgląd screena</div>
+        <img class="img-preview" src="data:{{ row['image_mime'] }};base64,{{ row['image_b64'] }}" alt="Wgrany screen" />
+      </div>
+    </div>
+
+    <div class="muted" style="margin-top:10px">
+      Uwaga: To narzędzie ma charakter edukacyjny i nie stanowi porady inwestycyjnej.
+    </div>
+  </div>
+</section>
+{% endblock %}
