@@ -12,38 +12,60 @@
 
     <div class="grid2" style="margin-top:14px">
       <div class="card card--inset">
-        <div class="mono">{{ result.pair }} • {{ result.timeframe }} • {{ result.bias }}</div>
+        <div class="mono">{{ result.pair }} • {{ result.timeframe }} • {{ result.signal }} • {{ result.confidence }}%</div>
         <div class="muted" style="margin-top:6px">{{ result.setup }}</div>
-
-        <div style="margin-top:12px" class="grid2">
-          <div>
-            <div class="muted">Entry</div>
-            <div class="big">{{ result.entry }}</div>
-          </div>
-          <div>
-            <div class="muted">Stop-loss</div>
-            <div class="big">{{ result.stop_loss }}</div>
-          </div>
+      {% if result.signal != "NO_TRADE" and result.is_chart %}
+      <div style="margin-top:12px" class="grid2">
+        <div class="kv">
+          <div>Entry</div>
+          <div class="big">{{ result.entry }}</div>
         </div>
-
-        <div style="margin-top:12px">
-          <div class="muted">Take-profit</div>
-          <div class="mono">
+        <div class="kv">
+          <div>Stop-loss</div>
+          <div class="big">{{ result.stop_loss }}</div>
+        </div>
+        <div class="kv">
+          <div>Take-profit</div>
+          <div class="chips">
             {% for tp in result.take_profit %}
-              <span class="pill">{{ tp }}</span>
+              <span class="chip">{{ tp }}</span>
             {% endfor %}
           </div>
         </div>
-
-        <div style="margin-top:12px">
-          <div class="muted">Wielkość pozycji</div>
-          <div class="mono">{{ result.position_size }}</div>
+        <div class="kv">
+          <div>Wielkość pozycji</div>
+          <div class="big">{{ result.position_size }}</div>
         </div>
-
-        <div style="margin-top:12px">
-          <div class="muted">Ryzyko / invalidation</div>
-          <div class="mono">{{ result.risk }}</div>
+        <div class="kv" style="grid-column: 1 / -1;">
+          <div>Ryzyko / invalidation</div>
+          <div class="muted">{{ result.risk }}<br><strong>Invalidation:</strong> {{ result.invalidation }}</div>
         </div>
+      </div>
+      {% else %}
+      <div class="muted" style="margin-top:12px">
+        <strong>NO_TRADE</strong> — {{ result.setup }}
+        {% if not result.is_chart %}<div class="muted" style="margin-top:6px">To nie wygląda na wykres. Wgraj screen z wykresu (świece + oś ceny i czasu).</div>{% endif %}
+      </div>
+      {% endif %}
+
+      {% if result.issues and result.issues|length > 0 %}
+      <div class="kv" style="margin-top:12px">
+        <div>Uwagi</div>
+        <div class="muted">
+          <ul style="margin:6px 0 0 18px">
+            {% for it in result.issues %}
+              <li>{{ it }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+      {% endif %}
+
+      <div class="kv" style="margin-top:12px">
+        <div>Newsy</div>
+        <div class="muted"><strong>{{ result.news.impact }}</strong> — {{ result.news.summary }}</div>
+      </div>
+
       </div>
 
       <div class="card card--inset">

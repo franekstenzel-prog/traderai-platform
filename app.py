@@ -203,6 +203,7 @@ def analyze_with_openai(
     timeframe: str,
     capital: float,
     risk_fraction: float,
+    news_context: str = "",
 ) -> dict:
     if not OPENAI_API_KEY:
         raise RuntimeError("Brak OPENAI_API_KEY w zmiennych środowiskowych.")
@@ -213,7 +214,6 @@ def analyze_with_openai(
 
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
     image_url = f"data:{image_mime};base64,{base64_image}"
-
     # JSON schema for a reliable response (Structured Outputs).
     schema = {
         "type": "object",
@@ -221,51 +221,93 @@ def analyze_with_openai(
         "properties": {
             "pair": {"type": "string"},
             "timeframe": {"type": "string"},
-            "setup": {"type": "string", "description": "Nazwa setupu i warunki jego ważności"},
-            "bias": {"type": "string", "enum": ["LONG", "SHORT", "NEUTRAL"]},
-            "entry": {"type": "string", "description": "Konkretny entry (liczba lub zakres)"},
-            "stop_loss": {"type": "string", "description": "Konkretny stop-loss (liczba lub zakres)"},
+
+            "is_chart": {"type": "boolean", "description": "Czy obraz wygląda na prawdziwy screen wykresu cenowego (np. świece/line chart z osią ceny i czasu)"},
+            "signal": {"type": "string", "enum": ["LONG", "SHORT", "NO_TRADE"], "description": "Jasny sygnał: LONG/SHORT lub NO_TRADE, jeśli brak czytelnego setupu"},
+            "confidence": {"type": "integer", "minimum": 0, "maximum": 100, "description": "Pewność sygnału w skali 0-100"},
+
+            "setup": {"type": "string", "description": "Nazwa setupu i warunki jego ważności (albo powód NO_TRADE)"},
+            "entry": {"type": ["string", "null"], "description": "Konkretny entry (liczba lub zakres) albo null przy NO_TRADE"},
+            "stop_loss": {"type": ["string", "null"], "description": "Konkretny stop-loss (liczba lub zakres) albo null przy NO_TRADE"},
             "take_profit": {
                 "type": "array",
                 "items": {"type": "string"},
-                "minItems": 1,
-                "description": "TP1/TP2/TP3 (liczby lub zakresy)",
+                "description": "TP1/TP2/TP3 (liczby lub zakresy); może być puste przy NO_TRADE",
             },
-            "risk": {"type": "string", "description": "Ryzyko, invalidation, co psuje setup"},
+
             "position_size": {
-                "type": "string",
-                "description": "Rozmiar pozycji / ekspozycja bazując na kapitale i ryzyku",
+                "type": ["string", "null"],
+                "description": "Rozmiar pozycji / ekspozycja bazując na kapitale i ryzyku; null przy NO_TRADE",
             },
-            "explanation": {"type": "string", "description": "Krótkie, profesjonalne wyjaśnienie"},
+
+            "risk": {"type": "string", "description": "Ryzyko, co może pójść nie tak; co psuje setup"},
+            "invalidation": {"type": "string", "description": "Jasny warunek unieważnienia setupu (np. 'powrót poniżej X')"},
+            "issues": {"type": "array", "items": {"type": "string"}, "description": "Lista problemów/uwag dot. jakości screena (brak osi ceny, nieczytelny interwał, itp.)"},
+
+            "news": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "mode": {"type": "string", "enum": ["not_provided", "user_provided"]},
+                    "impact": {"type": "string", "enum": ["BULLISH", "BEARISH", "MIXED", "UNKNOWN"]},
+                    "summary": {"type": "string"},
+                    "key_points": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["mode", "impact", "summary", "key_points"],
+            },
+
+            "explanation": {"type": "string", "description": "Krótkie, profesjonalne wyjaśnienie (bez obietnic zysków)"},
         },
         "required": [
             "pair",
             "timeframe",
+            "is_chart",
+            "signal",
+            "confidence",
             "setup",
-            "bias",
             "entry",
             "stop_loss",
             "take_profit",
-            "risk",
             "position_size",
+            "risk",
+            "invalidation",
+            "issues",
+            "news",
             "explanation",
         ],
     }
-
     instruction = f"""
 Jesteś profesjonalnym analitykiem tradingowym.
-Z analizy screena wykresu przygotuj plan transakcyjny.
+Twoim zadaniem jest NAJPIERW ocenić, czy obraz przedstawia realny wykres cenowy (screen wykresu), a dopiero potem przygotować plan transakcyjny.
 
 Dane od użytkownika:
 - para: {pair}
 - interwał: {timeframe}
 - kapitał: {capital}
 - ryzyko na trade: {risk_fraction} (część kapitału, np. 0.02 = 2%)
+- kontekst/news (opcjonalne, od użytkownika): {news_context or "BRAK"}
 
-Zasady:
-- Zwróć WYŁĄCZNIE obiekt JSON zgodny ze schematem.
-- Jeśli nie da się odczytać dokładnych liczb z osi ceny, podaj sensowne zakresy i opisz warunek (np. „po wybiciu ponad X / po retest”).
-- Nie pisz porad prawnych ani obietnic zysków. Skup się na technice: struktura, płynność, poziomy.
+Zasady decyzyjne:
+1) Jeśli to NIE jest wykres (np. randomowy obraz, brak świec i osi ceny/czasu), ustaw:
+   - is_chart=false, signal="NO_TRADE", confidence ≤ 20
+   - entry/stop_loss/position_size = null, take_profit = []
+   - w setup oraz explanation krótko napisz, że to nie jest wykres i czego brakuje.
+2) Jeśli to wykres, ale brak czytelnego setupu / nie da się wyznaczyć kierunku, ustaw:
+   - signal="NO_TRADE", confidence ≤ 50
+   - entry/stop_loss/position_size = null, take_profit = []
+   - podaj w issues/explanation dlaczego (np. rozmyty screen, brak osi, brak kontekstu trendu).
+3) LONG/SHORT wybieraj tylko, gdy sygnał jest wyraźny (confidence ≥ 65). Wtedy podaj entry, SL, TP oraz invalidation.
+
+Zarządzanie ryzykiem:
+- Ryzyko nominalne = kapitał * ryzyko_na_trade. Jeśli nie da się policzyć precyzyjnej wielkości pozycji (bo brak odległości do SL), podaj formułę i przykład (np. 'Ryzyko = 20 USDT; wielkość pozycji = 20 / (Entry-SL)').
+
+Newsy:
+- Jeżeli newsy nie są podane, ustaw news.mode="not_provided" i impact="UNKNOWN", a w summary napisz: "Brak danych o newsach — pominięto czynnik fundamentalny".
+- Jeżeli newsy są podane, podsumuj je krótko i oceń wpływ (impact). Nie zmyślaj faktów.
+
+Format:
+- Zwróć WYŁĄCZNIE obiekt JSON zgodny ze schematem (bez Markdown, bez dodatkowego tekstu).
+- Nie składaj obietnic zysków ani pewników. Maksymalnie rzeczowo.
 """
 
     resp = client.responses.create(
@@ -479,6 +521,8 @@ def analyze():
     capital = _f("capital", float(user["default_capital"] or 1000))
     risk_fraction = _f("risk_fraction", float(user["default_risk_fraction"] or 0.02))
 
+    news_context = (request.form.get("news_context") or "").strip()
+
     file = request.files.get("chart")
     try:
         filename, _ext = _validate_image(file)
@@ -505,6 +549,7 @@ def analyze():
             timeframe=timeframe,
             capital=capital,
             risk_fraction=risk_fraction,
+            news_context=news_context,
         )
     except Exception as e:
         flash(f"Analiza nieudana: {e}", "error")

@@ -101,6 +101,12 @@
             <span class="field__hint muted">Podaj jako część kapitału (0.02 = 2%).</span>
           </label>
 
+          <label class="field" style="grid-column: 1 / -1;">
+            <span class="field__label">Kontekst / newsy (opcjonalne)</span>
+            <textarea name="news_context" rows="3" placeholder="Wklej najważniejsze newsy / wydarzenia (np. CPI, decyzja FED, ETF, istotne info o aktywie). Jeśli puste — newsy będą oznaczone jako nieznane."></textarea>
+            <span class="field__hint muted">Jeśli nie podasz newsów, analiza będzie stricte techniczna.</span>
+          </label>
+
           <label class="field">
             <span class="field__label">Screen (PNG/JPG/WEBP)</span>
             <input name="chart" type="file" accept=".png,.jpg,.jpeg,.webp" required />
@@ -122,8 +128,9 @@
 
         <div class="grid2">
           <div class="card card--inset">
-            <div class="mono">{{ result.pair }} • {{ result.timeframe }} • {{ result.bias }}</div>
+            <div class="mono">{{ result.pair }} • {{ result.timeframe }} • {{ result.signal }} • {{ result.confidence }}%</div>
             <div class="muted" style="margin-top:6px">{{ result.setup }}</div>
+            {% if result.signal != "NO_TRADE" and result.is_chart %}
             <div style="margin-top:12px" class="grid2">
               <div>
                 <div class="muted">Entry</div>
@@ -151,7 +158,29 @@
 
             <div style="margin-top:12px">
               <div class="muted">Ryzyko / invalidation</div>
-              <div class="mono">{{ result.risk }}</div>
+              <div class="mono">{{ result.risk }}<br><strong>Invalidation:</strong> {{ result.invalidation }}</div>
+            </div>
+            {% else %}
+            <div class="muted" style="margin-top:12px">
+              <strong>NO_TRADE</strong> — {{ result.setup }}
+              {% if not result.is_chart %}<div class="muted" style="margin-top:6px">To nie wygląda na wykres. Wgraj screen z wykresu (świece + oś ceny i czasu).</div>{% endif %}
+            </div>
+            {% endif %}
+
+            {% if result.issues and result.issues|length > 0 %}
+            <div style="margin-top:12px">
+              <div class="muted">Uwagi</div>
+              <ul style="margin:6px 0 0 18px">
+                {% for it in result.issues %}
+                  <li class="muted">{{ it }}</li>
+                {% endfor %}
+              </ul>
+            </div>
+            {% endif %}
+
+            <div style="margin-top:12px">
+              <div class="muted">Newsy</div>
+              <div class="mono"><strong>{{ result.news.impact }}</strong> — {{ result.news.summary }}</div>
             </div>
           </div>
 

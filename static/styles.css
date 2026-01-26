@@ -212,7 +212,7 @@ a{color:inherit}
 
 .sidebar__actions{display:grid; gap:10px; margin-top:14px}
 label{font-weight:650}
-input,select{
+input,select,textarea{
   padding:10px 12px;
   border-radius:12px;
   border:1px solid var(--line);
@@ -220,7 +220,8 @@ input,select{
   color:var(--text);
   outline:none;
 }
-input:focus,select:focus{border-color: rgba(232,179,76,.35)}
+input:focus,select:focus,textarea:focus{border-color: rgba(232,179,76,.35)}
+textarea{resize:vertical; min-height:78px}
 
 .dash{display:grid; grid-template-columns: 320px 1fr; gap:14px; padding:24px 0}
 .sidebar__title{font-weight:900;font-size:18px}
