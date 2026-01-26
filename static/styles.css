@@ -192,6 +192,7 @@ a{color:inherit}
   padding:12px 14px;
   border:1px solid var(--line);
   background: rgba(17,24,39,.6);
+  overflow-wrap:anywhere;
 }
 .toast--ok{border-color: rgba(35,196,131,.35)}
 .toast--error{border-color: rgba(239,68,68,.35)}
@@ -199,6 +200,17 @@ a{color:inherit}
 .auth{padding:34px 0}
 .auth__card{max-width:420px;margin:0 auto}
 .form{display:grid; gap:10px; margin-top:12px}
+
+.field{display:grid; gap:6px}
+.field__label{font-size:12px; color:var(--muted); font-weight:750}
+.field__hint{display:block; font-size:12px; line-height:1.45; margin-top:4px}
+
+.grid2{display:grid; grid-template-columns:repeat(2,1fr); gap:14px}
+
+/* keep action button + hint from colliding */
+.field .btn{width:100%}
+
+.sidebar__actions{display:grid; gap:10px; margin-top:14px}
 label{font-weight:650}
 input,select{
   padding:10px 12px;

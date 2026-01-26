@@ -282,11 +282,10 @@ Zasady:
         text={
             "format": {
                 "type": "json_schema",
-                "json_schema": {
-                    "name": "trade_plan",
-                    "schema": schema,
-                    "strict": True,
-                },
+                # The API requires `text.format.name` for json_schema.
+                "name": "trade_plan",
+                "schema": schema,
+                "strict": True,
             }
         },
     )
