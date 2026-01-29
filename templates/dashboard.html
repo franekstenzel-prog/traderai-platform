@@ -67,7 +67,7 @@
     <div class="card">
       <div class="card__title">Analiza screena</div>
       <div class="muted" style="margin-bottom:12px">
-        Wgraj screen wykresu. Dostaniesz: setup, entry, SL, TP, wielkość pozycji i krótkie uzasadnienie.
+        Wgraj screen wykresu. Dostaniesz: kierunek (long/short) + entry + take profit + stop loss.
       </div>
 
       {% if not openai_enabled %}
@@ -101,12 +101,6 @@
             <span class="field__hint muted">Podaj jako część kapitału (0.02 = 2%).</span>
           </label>
 
-          <label class="field" style="grid-column: 1 / -1;">
-            <span class="field__label">Kontekst / newsy (opcjonalne)</span>
-            <textarea name="news_context" rows="3" placeholder="Wklej najważniejsze newsy / wydarzenia (np. CPI, decyzja FED, ETF, istotne info o aktywie). Jeśli puste — newsy będą oznaczone jako nieznane."></textarea>
-            <span class="field__hint muted">Jeśli nie podasz newsów, analiza będzie stricte techniczna.</span>
-          </label>
-
           <label class="field">
             <span class="field__label">Screen (PNG/JPG/WEBP)</span>
             <input name="chart" type="file" accept=".png,.jpg,.jpeg,.webp" required />
@@ -115,7 +109,7 @@
           <div class="field">
             <span class="field__label">Akcja</span>
             <button class="btn btn--primary" type="submit" {% if not openai_enabled %}disabled{% endif %}>Analizuj</button>
-            <span class="field__hint muted">Limit Free: {{ FREE_MONTHLY_LIMIT }}/miesiąc.</span>
+            <span class="field__hint muted">Limit Free: {{ FREE_MONTHLY_LIMIT }}/miesiąc. • Newsy pobierane automatycznie.</span>
           </div>
         </div>
       </form>
@@ -128,66 +122,51 @@
 
         <div class="grid2">
           <div class="card card--inset">
-            <div class="mono">{{ result.pair }} • {{ result.timeframe }} • {{ result.signal }} • {{ result.confidence }}%</div>
-            <div class="muted" style="margin-top:6px">{{ result.setup }}</div>
+            <div class="trade-head">
+              <div class="muted">{{ result.pair }} • {{ result.timeframe }}</div>
+              {% if result.signal == "LONG" %}
+                <div class="signal-banner signal-banner--long">long</div>
+              {% elif result.signal == "SHORT" %}
+                <div class="signal-banner signal-banner--short">short</div>
+              {% else %}
+                <div class="signal-banner signal-banner--no">no trade</div>
+              {% endif %}
+            </div>
+
             {% if result.signal != "NO_TRADE" and result.is_chart %}
-            <div style="margin-top:12px" class="grid2">
-              <div>
-                <div class="muted">Entry</div>
-                <div class="big">{{ result.entry }}</div>
+              <div class="trade-grid">
+                <div class="trade-box trade-box--entry">
+                  <div class="trade-box__label">Entry</div>
+                  <div class="trade-box__value">{{ result.entry }}</div>
+                </div>
+                <div class="trade-box trade-box--tp">
+                  <div class="trade-box__label">Take profit</div>
+                  <div class="trade-box__value">
+                    {% if result.take_profit and result.take_profit|length %}
+                      <div class="chips">
+                        {% for tp in result.take_profit %}
+                          <span class="chip">{{ tp }}</span>
+                        {% endfor %}
+                      </div>
+                    {% else %}
+                      —
+                    {% endif %}
+                  </div>
+                </div>
+                <div class="trade-box trade-box--sl">
+                  <div class="trade-box__label">Stop loss</div>
+                  <div class="trade-box__value">{{ result.stop_loss }}</div>
+                </div>
               </div>
-              <div>
-                <div class="muted">Stop-loss</div>
-                <div class="big">{{ result.stop_loss }}</div>
-              </div>
-            </div>
-
-            <div style="margin-top:12px">
-              <div class="muted">Take-profit</div>
-              <div class="mono">
-                {% for tp in result.take_profit %}
-                  <span class="pill">{{ tp }}</span>
-                {% endfor %}
-              </div>
-            </div>
-
-            <div style="margin-top:12px">
-              <div class="muted">Wielkość pozycji</div>
-              <div class="mono">{{ result.position_size }}</div>
-            </div>
-
-            <div style="margin-top:12px">
-              <div class="muted">Ryzyko / invalidation</div>
-              <div class="mono">{{ result.risk }}<br><strong>Invalidation:</strong> {{ result.invalidation }}</div>
-            </div>
             {% else %}
-            <div class="muted" style="margin-top:12px">
-              <strong>NO_TRADE</strong> — {{ result.setup }}
-              {% if not result.is_chart %}<div class="muted" style="margin-top:6px">To nie wygląda na wykres. Wgraj screen z wykresu (świece + oś ceny i czasu).</div>{% endif %}
-            </div>
+              <div class="muted" style="margin-top:10px">
+                {{ result.setup }}
+                {% if not result.is_chart %}<div class="muted" style="margin-top:6px">To nie wygląda na wykres. Wgraj screen z wykresu (świece + oś ceny i czasu).</div>{% endif %}
+              </div>
             {% endif %}
-
-            {% if result.issues and result.issues|length > 0 %}
-            <div style="margin-top:12px">
-              <div class="muted">Uwagi</div>
-              <ul style="margin:6px 0 0 18px">
-                {% for it in result.issues %}
-                  <li class="muted">{{ it }}</li>
-                {% endfor %}
-              </ul>
-            </div>
-            {% endif %}
-
-            <div style="margin-top:12px">
-              <div class="muted">Newsy</div>
-              <div class="mono"><strong>{{ result.news.impact }}</strong> — {{ result.news.summary }}</div>
-            </div>
           </div>
 
           <div class="card card--inset">
-            <div class="muted">Wyjaśnienie</div>
-            <div style="margin-top:8px; white-space: pre-line">{{ result.explanation }}</div>
-
             <div class="muted" style="margin-top:14px">Podgląd screena</div>
             <img class="img-preview" src="data:{{ last['image_mime'] }};base64,{{ last['image_b64'] }}" alt="Wgrany screen" />
           </div>

@@ -3,11 +3,15 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Optional
+
+import xml.etree.ElementTree as ET
+from urllib.request import Request, urlopen
 
 import stripe
 from flask import (
@@ -196,6 +200,126 @@ def _infer_mime(filename: str) -> str:
     return "application/octet-stream"
 
 
+# -----------------------------
+# Auto news context (RSS)
+# -----------------------------
+# Lightweight RSS headline fetcher used to enrich the model prompt.
+# No API keys, best-effort, with short timeouts + graceful fallback.
+
+DEFAULT_NEWS_RSS_URLS = [
+    # CoinDesk (official RSS)
+    "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",
+    # Cointelegraph
+    "https://cointelegraph.com/rss",
+]
+
+_NEWS_CACHE = {"ts": 0.0, "key": "", "text": ""}
+
+
+def _strip_ns(tag: str) -> str:
+    return tag.split("}", 1)[-1] if "}" in tag else tag
+
+
+def _extract_base_asset(pair: str) -> str:
+    pair = (pair or "").upper().strip()
+    # Remove common quote assets from the end.
+    for q in ("USDT", "USDC", "USD", "BUSD", "EUR", "GBP", "TRY", "BTC", "ETH", "BNB"):
+        if pair.endswith(q) and len(pair) > len(q):
+            return pair[: -len(q)]
+    return pair
+
+
+def _fetch_rss_items(url: str, timeout: float = 3.5):
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "TraderAI/1.0 (+https://example.local)",
+            "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+        },
+    )
+    with urlopen(req, timeout=timeout) as r:
+        data = r.read()
+
+    root = ET.fromstring(data)
+    items = []
+    for el in root.iter():
+        if _strip_ns(el.tag) != "item":
+            continue
+        title = ""
+        pub = ""
+        for ch in list(el):
+            name = _strip_ns(ch.tag).lower()
+            if name == "title" and (ch.text or "").strip():
+                title = (ch.text or "").strip()
+            elif name in ("pubdate", "published", "updated") and (ch.text or "").strip():
+                pub = (ch.text or "").strip()
+        if title:
+            items.append({"title": title, "pub": pub})
+    return items
+
+
+def auto_news_context(pair: str, timeframe: str = "") -> str:
+    """Best-effort news headlines context.
+
+    Uses RSS. If it fails (network blocked, RSS changed), returns an empty string.
+    Cached briefly to avoid repeated fetches.
+    """
+
+    # Allow disabling via env for locked-down deployments.
+    if os.environ.get("AUTO_NEWS_DISABLED") == "1":
+        return ""
+
+    urls_env = (os.environ.get("NEWS_RSS_URLS") or "").strip()
+    urls = [u.strip() for u in urls_env.split(",") if u.strip()] if urls_env else DEFAULT_NEWS_RSS_URLS
+
+    base = _extract_base_asset(pair)
+    cache_key = f"{base}:{timeframe}:{'|'.join(urls)}"
+    now_ts = datetime.now(timezone.utc).timestamp()
+    if _NEWS_CACHE["key"] == cache_key and (now_ts - float(_NEWS_CACHE["ts"] or 0)) < 300:
+        return _NEWS_CACHE["text"] or ""
+
+    try:
+        all_items = []
+        for u in urls[:4]:
+            all_items.extend(_fetch_rss_items(u))
+
+        # Prefer headlines that mention the asset/ticker.
+        base_up = base.upper()
+        scored = []
+        for it in all_items:
+            t = it["title"]
+            t_up = t.upper()
+            score = 0
+            if base_up and base_up in t_up:
+                score += 3
+            if re.search(r"\b" + re.escape(base_up) + r"\b", t_up):
+                score += 2
+            scored.append((score, it))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        picked = [it for s, it in scored if s > 0][:6]
+        if len(picked) < 4:
+            # Fallback: add general top headlines.
+            picked = (picked + [it for _s, it in scored][:6])[:6]
+
+        lines = []
+        for it in picked:
+            # Keep it short. PubDate formats vary; pass as-is.
+            if it.get("pub"):
+                lines.append(f"- {it['pub']}: {it['title']}")
+            else:
+                lines.append(f"- {it['title']}")
+
+        text = "AUTO_NEWS (headlines, best-effort):\n" + "\n".join(lines)
+        # Hard cap to protect tokens.
+        text = text[:1500]
+    except Exception:
+        text = ""
+
+    _NEWS_CACHE.update({"ts": now_ts, "key": cache_key, "text": text})
+    return text
+
+
 def analyze_with_openai(
     image_bytes: bytes,
     image_mime: str,
@@ -280,30 +404,40 @@ def analyze_with_openai(
 Jesteś profesjonalnym analitykiem tradingowym.
 Twoim zadaniem jest NAJPIERW ocenić, czy obraz przedstawia realny wykres cenowy (screen wykresu), a dopiero potem przygotować plan transakcyjny.
 
-Dane od użytkownika:
+Parametry:
 - para: {pair}
 - interwał: {timeframe}
 - kapitał: {capital}
 - ryzyko na trade: {risk_fraction} (część kapitału, np. 0.02 = 2%)
-- kontekst/news (opcjonalne, od użytkownika): {news_context or "BRAK"}
+- kontekst/news (AUTO, bez pytania użytkownika; może być puste): {news_context or "BRAK"}
+
+Analiza techniczna (uwzględnij WSZYSTKO co widać na screenie):
+- struktura rynku (trend, swing highs/lows, BOS/CHoCH)
+- poziomy wsparcia/oporu, reakcji ceny, wielokrotne testy
+- liquidity: sweepy, liquidity pools, equal highs/lows, stop hunts
+- formacje świecowe i zachowanie knotów/korpusu (impuls vs. dystrybucja)
+- strefy podaży/popytu, order blocks, fair value gaps/imbalances (jeśli widoczne)
+- wolumen/indikatory tylko jeśli są na screenie (nie zgaduj niewidocznych danych)
 
 Zasady decyzyjne:
 1) Jeśli to NIE jest wykres (np. randomowy obraz, brak świec i osi ceny/czasu), ustaw:
    - is_chart=false, signal="NO_TRADE", confidence ≤ 20
    - entry/stop_loss/position_size = null, take_profit = []
    - w setup oraz explanation krótko napisz, że to nie jest wykres i czego brakuje.
-2) Jeśli to wykres, ale brak czytelnego setupu / nie da się wyznaczyć kierunku, ustaw:
-   - signal="NO_TRADE", confidence ≤ 50
-   - entry/stop_loss/position_size = null, take_profit = []
-   - podaj w issues/explanation dlaczego (np. rozmyty screen, brak osi, brak kontekstu trendu).
-3) LONG/SHORT wybieraj tylko, gdy sygnał jest wyraźny (confidence ≥ 65). Wtedy podaj entry, SL, TP oraz invalidation.
+2) Jeśli to wykres, preferuj LONG/SHORT zawsze gdy da się wyznaczyć kierunek i sensowny setup.
+   NO_TRADE ustaw WYŁĄCZNIE w sytuacjach krytycznych:
+   - screen jest nieczytelny / brak kluczowych informacji (oś ceny/czasu, interwał) LUB
+   - rynek jest w "burzy" (ekstremalna zmienność/whipsaw bez struktury) i nie da się logicznie zdefiniować entry/SL.
+   W NO_TRADE: confidence ≤ 50, entry/stop_loss/position_size = null, take_profit = [], a w setup 1 zdanie dlaczego.
+3) Jeśli wybierasz LONG/SHORT, podaj konkretnie: entry, stop_loss, take_profit (TP1/TP2/TP3) oraz invalidation.
+   Confidence ustaw realistycznie (np. 55-80). Nie zawyżaj.
 
 Zarządzanie ryzykiem:
 - Ryzyko nominalne = kapitał * ryzyko_na_trade. Jeśli nie da się policzyć precyzyjnej wielkości pozycji (bo brak odległości do SL), podaj formułę i przykład (np. 'Ryzyko = 20 USDT; wielkość pozycji = 20 / (Entry-SL)').
 
 Newsy:
-- Jeżeli newsy nie są podane, ustaw news.mode="not_provided" i impact="UNKNOWN", a w summary napisz: "Brak danych o newsach — pominięto czynnik fundamentalny".
-- Jeżeli newsy są podane, podsumuj je krótko i oceń wpływ (impact). Nie zmyślaj faktów.
+- Jeżeli kontekst/news jest pusty, ustaw news.mode="not_provided" i impact="UNKNOWN". Nie pytaj użytkownika o newsy.
+- Jeżeli kontekst/news jest podany (w tym AUTO_NEWS), ustaw news.mode="user_provided" i oceń wpływ (impact) bez zmyślania faktów.
 
 Format:
 - Zwróć WYŁĄCZNIE obiekt JSON zgodny ze schematem (bez Markdown, bez dodatkowego tekstu).
@@ -521,7 +655,8 @@ def analyze():
     capital = _f("capital", float(user["default_capital"] or 1000))
     risk_fraction = _f("risk_fraction", float(user["default_risk_fraction"] or 0.02))
 
-    news_context = (request.form.get("news_context") or "").strip()
+    # Auto news (best-effort) — do not ask the user for it.
+    news_context = auto_news_context(pair=pair, timeframe=timeframe)
 
     file = request.files.get("chart")
     try:
