@@ -127,88 +127,64 @@
         <div class="card__title">Ostatnia analiza</div>
 
         <div class="grid2">
-          
-<div class="card card--inset">
-  <div class="analysis-header">
-    <div>
-      <div class="mono muted">{{ result.pair }} • {{ result.timeframe }}</div>
-      <div class="muted" style="margin-top:6px">{{ result.setup }}</div>
-    </div>
+          <div class="card card--inset">
+            <div class="mono">{{ result.pair }} • {{ result.timeframe }} • {{ result.signal }} • {{ result.confidence }}%</div>
+            <div class="muted" style="margin-top:6px">{{ result.setup }}</div>
+            {% if result.signal != "NO_TRADE" and result.is_chart %}
+            <div style="margin-top:12px" class="grid2">
+              <div>
+                <div class="muted">Entry</div>
+                <div class="big">{{ result.entry }}</div>
+              </div>
+              <div>
+                <div class="muted">Stop-loss</div>
+                <div class="big">{{ result.stop_loss }}</div>
+              </div>
+            </div>
 
-    {% set sig = result.signal %}
-    <div class="signal-badge
-      {% if sig == 'LONG' %} signal-badge--long
-      {% elif sig == 'SHORT' %} signal-badge--short
-      {% else %} signal-badge--no
-      {% endif %}
-    ">{{ sig }}</div>
-  </div>
+            <div style="margin-top:12px">
+              <div class="muted">Take-profit</div>
+              <div class="mono">
+                {% for tp in result.take_profit %}
+                  <span class="pill">{{ tp }}</span>
+                {% endfor %}
+              </div>
+            </div>
 
-  <div class="trade-boxes">
-    <div class="trade-box trade-box--entry">
-      <div class="trade-box__label">Entry</div>
-      <div class="trade-box__value">{{ result.entry or "—" }}</div>
-    </div>
+            <div style="margin-top:12px">
+              <div class="muted">Wielkość pozycji</div>
+              <div class="mono">{{ result.position_size }}</div>
+            </div>
 
-    <div class="trade-box trade-box--sl">
-      <div class="trade-box__label">Stop-loss</div>
-      <div class="trade-box__value">{{ result.stop_loss or "—" }}</div>
-    </div>
+            <div style="margin-top:12px">
+              <div class="muted">Ryzyko / invalidation</div>
+              <div class="mono">{{ result.risk }}<br><strong>Invalidation:</strong> {{ result.invalidation }}</div>
+            </div>
+            {% else %}
+            <div class="muted" style="margin-top:12px">
+              <strong>NO_TRADE</strong> — {{ result.setup }}
+              {% if not result.is_chart %}<div class="muted" style="margin-top:6px">To nie wygląda na wykres. Wgraj screen z wykresu (świece + oś ceny i czasu).</div>{% endif %}
+            </div>
+            {% endif %}
 
-    <div class="trade-box trade-box--tp">
-      <div class="trade-box__label">Take-profit</div>
-      <div class="trade-box__value">
-        {% if result.take_profit and result.take_profit|length > 0 %}
-          {{ result.take_profit|join(" • ") }}
-        {% else %}
-          —
-        {% endif %}
-      </div>
-    </div>
-  </div>
+            {% if result.issues and result.issues|length > 0 %}
+            <div style="margin-top:12px">
+              <div class="muted">Uwagi</div>
+              <ul style="margin:6px 0 0 18px">
+                {% for it in result.issues %}
+                  <li class="muted">{{ it }}</li>
+                {% endfor %}
+              </ul>
+            </div>
+            {% endif %}
 
-  <div class="grid2" style="margin-top:14px">
-    <div>
-      <div class="muted">Wielkość pozycji</div>
-      <div class="big">{{ result.position_size }}</div>
-    </div>
-    <div>
-      <div class="muted">Pewność</div>
-      <div class="big">{{ result.confidence }}%</div>
-    </div>
-  </div>
+            <div style="margin-top:12px">
+              <div class="muted">Newsy</div>
+              <div class="mono"><strong>{{ result.news.impact }}</strong> — {{ result.news.summary }}</div>
+            </div>
+          </div>
 
-  <div style="margin-top:14px">
-    <div class="muted">Newsy</div>
-    <div class="mono"><strong>{{ result.news.impact }}</strong> — {{ result.news.summary }}</div>
-    {% if result.news.headlines and result.news.headlines|length > 0 %}
-      <ul class="muted" style="margin:8px 0 0 18px">
-        {% for h in result.news.headlines %}
-          <li class="muted">{{ h }}</li>
-        {% endfor %}
-      </ul>
-    {% endif %}
-  </div>
-
-  <div style="margin-top:14px">
-    <div class="muted">Ryzyko / invalidation</div>
-    <div class="mono">{{ result.risk }}</div>
-    <div class="muted" style="margin-top:8px">{{ result.invalidation }}</div>
-  </div>
-
-  {% if result.issues and result.issues|length > 0 %}
-    <div style="margin-top:14px">
-      <div class="muted">Uwagi</div>
-      <ul class="muted" style="margin:8px 0 0 18px">
-        {% for it in result.issues %}
-          <li class="muted">{{ it }}</li>
-        {% endfor %}
-      </ul>
-    </div>
-  {% endif %}
-</div>
-
-<div class="card card--inset">
+          <div class="card card--inset">
             <div class="muted">Wyjaśnienie</div>
             <div style="margin-top:8px; white-space: pre-line">{{ result.explanation }}</div>
 

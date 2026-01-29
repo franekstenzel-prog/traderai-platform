@@ -8,12 +8,6 @@ from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Optional
-import time
-from urllib.parse import urlparse
-
-import feedparser
-import requests
-
 
 import stripe
 from flask import (
@@ -43,15 +37,6 @@ SECRET_KEY = os.environ.get("SECRET_KEY") or "dev-secret-change-me"
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
-
-
-NEWS_RSS_FEEDS = [
-    # General crypto news (RSS). Used to provide context; may not be pair-specific.
-    "https://www.coindesk.com/arc/outboundfeeds/rss/",
-    "https://cointelegraph.com/rss",
-]
-NEWS_CACHE_SECONDS = int(os.environ.get("NEWS_CACHE_SECONDS", "300"))
-
 
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY")
 STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY")
@@ -92,64 +77,6 @@ def close_db(_exc):
 def _column_exists(db: sqlite3.Connection, table: str, column: str) -> bool:
     rows = db.execute(f"PRAGMA table_info({table})").fetchall()
     return any(r["name"] == column for r in rows)
-
-# -----------------------------
-# News helper (RSS)
-# -----------------------------
-_NEWS_CACHE: dict[str, object] = {"ts": 0.0, "items": []}
-
-def _norm_source(url: str) -> str:
-    try:
-        host = urlparse(url).netloc.replace("www.", "")
-        return host or "source"
-    except Exception:
-        return "source"
-
-def fetch_news_context(pair: str, limit: int = 6) -> dict:
-    """Fetch recent crypto headlines (RSS) and return a small context object.
-    This is best-effort: failures return empty context.
-    """
-    now = time.time()
-    if (now - float(_NEWS_CACHE.get("ts", 0) or 0)) < NEWS_CACHE_SECONDS:
-        items = _NEWS_CACHE.get("items", []) or []
-        return {"headlines": [it["title"] for it in items][:limit], "raw_items": items[:limit]}
-
-    items: list[dict] = []
-    headers = {"User-Agent": "TraderAI/1.0 (+https://render.com)"}
-
-    for feed_url in NEWS_RSS_FEEDS:
-        try:
-            resp = requests.get(feed_url, timeout=6, headers=headers)
-            resp.raise_for_status()
-            feed = feedparser.parse(resp.text)
-            for e in (feed.entries or [])[:limit]:
-                title = getattr(e, "title", "") or ""
-                link = getattr(e, "link", "") or ""
-                if not title:
-                    continue
-                items.append({
-                    "title": title.strip(),
-                    "link": link,
-                    "source": _norm_source(link or feed_url),
-                    "published": getattr(e, "published", "") or "",
-                })
-        except Exception:
-            continue
-
-    # de-dup by title
-    seen=set()
-    uniq=[]
-    for it in items:
-        t=it["title"].lower()
-        if t in seen:
-            continue
-        seen.add(t)
-        uniq.append(it)
-
-    _NEWS_CACHE["ts"] = now
-    _NEWS_CACHE["items"] = uniq[: max(limit, 10)]
-    return {"headlines": [it["title"] for it in uniq][:limit], "raw_items": uniq[:limit]}
-
 
 
 def _ensure_columns(db: sqlite3.Connection) -> None:
@@ -269,88 +196,72 @@ def _infer_mime(filename: str) -> str:
     return "application/octet-stream"
 
 
-
 def analyze_with_openai(
-    image_path: Path,
-    *,
+    image_bytes: bytes,
+    image_mime: str,
     pair: str,
     timeframe: str,
     capital: float,
     risk_fraction: float,
+    news_context: str = "",
 ) -> dict:
-    """Use OpenAI to produce a structured trade plan from a chart screenshot.
+    if not OPENAI_API_KEY:
+        raise RuntimeError("Brak OPENAI_API_KEY w zmiennych środowiskowych.")
 
-    Output is STRICT JSON (schema) for reliable rendering in the UI.
-    """
     from openai import OpenAI  # lazy import
 
-    if not OPENAI_API_KEY:
-        raise RuntimeError("Missing OPENAI_API_KEY env var.")
+    client = OpenAI(api_key=OPENAI_API_KEY)
 
-    # Prepare image as data URL
-    raw = image_path.read_bytes()
-    b64 = base64.b64encode(raw).decode("ascii")
-    mime = "image/png" if image_path.suffix.lower() in {".png"} else "image/jpeg"
-    image_url = f"data:{mime};base64,{b64}"
-
-    # Fetch news context automatically (best-effort)
-    news_ctx = fetch_news_context(pair, limit=6)
-    news_lines = "\n".join([f"- {h}" for h in (news_ctx.get("headlines") or [])])
-    if not news_lines.strip():
-        news_lines = "- (brak headline'ów z RSS — potraktuj czynnik newsowy jako UNKNOWN)"
-
-    # Strict schema for the model output
+    base64_image = base64.b64encode(image_bytes).decode("utf-8")
+    image_url = f"data:{image_mime};base64,{base64_image}"
+    # JSON schema for a reliable response (Structured Outputs).
     schema = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "is_chart": {"type": "boolean"},
             "pair": {"type": "string"},
             "timeframe": {"type": "string"},
-            "signal": {"type": "string", "enum": ["LONG", "SHORT", "NO_TRADE"]},
-            "confidence": {"type": "integer", "minimum": 1, "maximum": 99},
-            "setup": {"type": "string"},
-            "entry": {"type": "string"},
-            "stop_loss": {"type": "string"},
+
+            "is_chart": {"type": "boolean", "description": "Czy obraz wygląda na prawdziwy screen wykresu cenowego (np. świece/line chart z osią ceny i czasu)"},
+            "signal": {"type": "string", "enum": ["LONG", "SHORT", "NO_TRADE"], "description": "Jasny sygnał: LONG/SHORT lub NO_TRADE, jeśli brak czytelnego setupu"},
+            "confidence": {"type": "integer", "minimum": 0, "maximum": 100, "description": "Pewność sygnału w skali 0-100"},
+
+            "setup": {"type": "string", "description": "Nazwa setupu i warunki jego ważności (albo powód NO_TRADE)"},
+            "entry": {"type": ["string", "null"], "description": "Konkretny entry (liczba lub zakres) albo null przy NO_TRADE"},
+            "stop_loss": {"type": ["string", "null"], "description": "Konkretny stop-loss (liczba lub zakres) albo null przy NO_TRADE"},
             "take_profit": {
                 "type": "array",
                 "items": {"type": "string"},
-                "minItems": 0,
-                "maxItems": 3,
+                "description": "TP1/TP2/TP3 (liczby lub zakresy); może być puste przy NO_TRADE",
             },
-            "position_size": {"type": "string"},
-            "risk": {"type": "string"},
-            "invalidation": {"type": "string"},
+
+            "position_size": {
+                "type": ["string", "null"],
+                "description": "Rozmiar pozycji / ekspozycja bazując na kapitale i ryzyku; null przy NO_TRADE",
+            },
+
+            "risk": {"type": "string", "description": "Ryzyko, co może pójść nie tak; co psuje setup"},
+            "invalidation": {"type": "string", "description": "Jasny warunek unieważnienia setupu (np. 'powrót poniżej X')"},
+            "issues": {"type": "array", "items": {"type": "string"}, "description": "Lista problemów/uwag dot. jakości screena (brak osi ceny, nieczytelny interwał, itp.)"},
+
             "news": {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "impact": {
-                        "type": "string",
-                        "enum": ["BULLISH", "BEARISH", "MIXED", "NEUTRAL", "UNKNOWN"],
-                    },
+                    "mode": {"type": "string", "enum": ["not_provided", "user_provided"]},
+                    "impact": {"type": "string", "enum": ["BULLISH", "BEARISH", "MIXED", "UNKNOWN"]},
                     "summary": {"type": "string"},
-                    "headlines": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "minItems": 0,
-                        "maxItems": 6,
-                    },
+                    "key_points": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["impact", "summary", "headlines"],
+                "required": ["mode", "impact", "summary", "key_points"],
             },
-            "explanation": {"type": "string"},
-            "issues": {
-                "type": "array",
-                "items": {"type": "string"},
-                "minItems": 0,
-                "maxItems": 6,
-            },
+
+            "explanation": {"type": "string", "description": "Krótkie, profesjonalne wyjaśnienie (bez obietnic zysków)"},
         },
         "required": [
-            "is_chart",
             "pair",
             "timeframe",
+            "is_chart",
             "signal",
             "confidence",
             "setup",
@@ -360,52 +271,45 @@ def analyze_with_openai(
             "position_size",
             "risk",
             "invalidation",
+            "issues",
             "news",
             "explanation",
-            "issues",
         ],
     }
-
-    # Instruction for the model (Polish, professional trading language)
     instruction = f"""
-Jesteś profesjonalnym analitykiem rynku (krypto). Oceniasz tylko na podstawie screena wykresu, podanej pary i interwału.
-Masz zwrócić JEDEN trade plan w formacie JSON (ściśle wg schemy), bez dodatkowego tekstu.
+Jesteś profesjonalnym analitykiem tradingowym.
+Twoim zadaniem jest NAJPIERW ocenić, czy obraz przedstawia realny wykres cenowy (screen wykresu), a dopiero potem przygotować plan transakcyjny.
 
-Parametry użytkownika:
-- Para: {pair}
-- Interwał: {timeframe}
-- Kapitał: {capital} (w walucie quote, np. USDT)
-- Ryzyko na trade: {risk_fraction} (ułamek kapitału, np. 0.02 = 2%)
+Dane od użytkownika:
+- para: {pair}
+- interwał: {timeframe}
+- kapitał: {capital}
+- ryzyko na trade: {risk_fraction} (część kapitału, np. 0.02 = 2%)
+- kontekst/news (opcjonalne, od użytkownika): {news_context or "BRAK"}
 
-Kontekst newsowy (ostatnie nagłówki — wykorzystaj jeśli istotne, bez halucynacji):
-{news_lines}
+Zasady decyzyjne:
+1) Jeśli to NIE jest wykres (np. randomowy obraz, brak świec i osi ceny/czasu), ustaw:
+   - is_chart=false, signal="NO_TRADE", confidence ≤ 20
+   - entry/stop_loss/position_size = null, take_profit = []
+   - w setup oraz explanation krótko napisz, że to nie jest wykres i czego brakuje.
+2) Jeśli to wykres, ale brak czytelnego setupu / nie da się wyznaczyć kierunku, ustaw:
+   - signal="NO_TRADE", confidence ≤ 50
+   - entry/stop_loss/position_size = null, take_profit = []
+   - podaj w issues/explanation dlaczego (np. rozmyty screen, brak osi, brak kontekstu trendu).
+3) LONG/SHORT wybieraj tylko, gdy sygnał jest wyraźny (confidence ≥ 65). Wtedy podaj entry, SL, TP oraz invalidation.
 
-ZASADY:
-1) Najpierw oceń, czy obraz wygląda jak WYKRES CENOWY (świece/price action + oś ceny/czasu, typowy interfejs giełdy).
-   - Jeśli NIE: is_chart=false i signal="NO_TRADE". Wypełnij entry/SL/TP jako "—", take_profit jako [] i krótko wyjaśnij w explanation co jest nie tak.
-2) Jeśli TAK: is_chart=true. Domyślnie wybieraj LONG albo SHORT (signal), a "NO_TRADE" tylko w RZADKICH przypadkach:
-   - wykres jest nieczytelny / za mało danych / brak osi / nie da się sensownie wyznaczyć entry i SL.
-3) Trade musi być konkretny i renderowalny:
-   - entry: liczba z jednostką (np. "34500 USDT") lub warunek typu "po wybiciu > 34500 USDT i retest".
-   - stop_loss: konkretny poziom, nie pod lokalnym dołkiem jeśli to oczywisty liquidity pool (jeśli widać).
-   - take_profit: 1–3 poziomy (TP1/TP2/TP3) w strings.
-4) Uwzględnij ryzyko:
-   - risk_amount = capital * risk_fraction
-   - Jeśli podajesz entry i SL jako poziomy cen, oszacuj wielkość pozycji (position_size) tak, by ryzyko ≈ risk_amount.
-     Jeśli brakuje precyzyjnych liczb, podaj ostrożne przybliżenie (np. notional w USDT) i to zaznacz.
-5) News:
-   - Określ impact: BULLISH/BEARISH/MIXED/NEUTRAL/UNKNOWN i zrób 1–2 zdaniowe podsumowanie (summary).
-   - Nie wymyślaj newsów spoza listy nagłówków.
-6) explanation:
-   - 4–8 zdań, profesjonalnie: trend, struktura rynku, kluczowe poziomy, płynność, momentum/volatility, co potwierdza kierunek i co go unieważnia.
-   - Zero obietnic typu „90% skuteczności”. Zawsze dodaj krótką uwagę o niepewności.
-7) issues:
-   - Zapisz maks 6 krótkich ostrzeżeń (np. "Brak wolumenu na screenie", "Możliwy fałszywy breakout", itp.).
-   - Jeśli jest czysto, zwróć [].
+Zarządzanie ryzykiem:
+- Ryzyko nominalne = kapitał * ryzyko_na_trade. Jeśli nie da się policzyć precyzyjnej wielkości pozycji (bo brak odległości do SL), podaj formułę i przykład (np. 'Ryzyko = 20 USDT; wielkość pozycji = 20 / (Entry-SL)').
 
-Zwróć poprawny JSON zgodny ze schemą."""
+Newsy:
+- Jeżeli newsy nie są podane, ustaw news.mode="not_provided" i impact="UNKNOWN", a w summary napisz: "Brak danych o newsach — pominięto czynnik fundamentalny".
+- Jeżeli newsy są podane, podsumuj je krótko i oceń wpływ (impact). Nie zmyślaj faktów.
 
-    client = OpenAI(api_key=OPENAI_API_KEY)
+Format:
+- Zwróć WYŁĄCZNIE obiekt JSON zgodny ze schematem (bez Markdown, bez dodatkowego tekstu).
+- Nie składaj obietnic zysków ani pewników. Maksymalnie rzeczowo.
+"""
+
     resp = client.responses.create(
         model=OPENAI_MODEL,
         input=[
@@ -420,57 +324,23 @@ Zwróć poprawny JSON zgodny ze schemą."""
         text={
             "format": {
                 "type": "json_schema",
-                "name": "trade_plan_v2",
+                # The API requires `text.format.name` for json_schema.
+                "name": "trade_plan",
                 "schema": schema,
                 "strict": True,
             }
         },
     )
 
+    # Structured outputs should return valid JSON in output_text.
     out = (resp.output_text or "").strip()
-    if not out:
-        raise RuntimeError("OpenAI returned empty output.")
+    return json.loads(out)
 
-    try:
-        data = json.loads(out)
-    except Exception as e:
-        raise RuntimeError(f"OpenAI output is not valid JSON: {e}\n\nRAW: {out[:500]}")
 
-    # Minimal normalization for safety
-    data["pair"] = (data.get("pair") or pair).upper()
-    data["timeframe"] = (data.get("timeframe") or timeframe).upper()
-
-    if not isinstance(data.get("take_profit"), list):
-        data["take_profit"] = []
-    data["take_profit"] = [str(x) for x in data["take_profit"]][:3]
-
-    # Ensure required string fields exist
-    for k in ["setup", "entry", "stop_loss", "position_size", "risk", "invalidation", "explanation"]:
-        data[k] = str(data.get(k) or "").strip() or "—"
-
-    if not isinstance(data.get("issues"), list):
-        data["issues"] = []
-    data["issues"] = [str(x) for x in data["issues"]][:6]
-
-    if not isinstance(data.get("news"), dict):
-        data["news"] = {"impact": "UNKNOWN", "summary": "Brak danych.", "headlines": []}
-    data["news"].setdefault("impact", "UNKNOWN")
-    data["news"].setdefault("summary", "Brak danych.")
-    data["news"].setdefault("headlines", [])
-    if not isinstance(data["news"].get("headlines"), list):
-        data["news"]["headlines"] = []
-    data["news"]["headlines"] = [str(x) for x in data["news"]["headlines"]][:6]
-
-    # If NO_TRADE, enforce placeholders for consistent UI
-    if data.get("signal") == "NO_TRADE" or not data.get("is_chart"):
-        data["signal"] = "NO_TRADE"
-        data["entry"] = data.get("entry") if data.get("entry") and data.get("entry") != "—" else "—"
-        data["stop_loss"] = data.get("stop_loss") if data.get("stop_loss") and data.get("stop_loss") != "—" else "—"
-        data["take_profit"] = []
-        data["position_size"] = "0"
-        if not data.get("setup") or data["setup"] == "—":
-            data["setup"] = "Brak czytelnego setupu na podstawie screena."
-    return data
+# -----------------------------
+# Routes
+# -----------------------------
+@app.before_request
 def _ensure_db():
     init_db()
 
