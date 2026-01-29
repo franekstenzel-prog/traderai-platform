@@ -407,61 +407,6 @@ def analyze_with_openai(
             "explanation",
         ],
     }
-
-    # Full technical-analysis checklist injected into the prompt.
-    # IMPORTANT: The model must only reference items that are actually visible on the screenshot.
-    TECHNICAL_ANALYSIS_CHECKLIST = """
-CHECKLIST (rozważ tylko to, co widać na screenie; NICZEGO nie zgaduj):
-
-- KONTEKST / WARUNKI:
-  - TF/MTF (trend z HTF + wejście na LTF), jakość screena (czytelność osi, zoom)
-  - sesja (Azja/Londyn/NY), "dead hours", luki/rollover (jeśli widoczne)
-  - zmienność (range/ATR/BB width jeśli widoczne), czy rynek jest trendowy czy "chop"
-  - instrument-specyficzne: spread/płynność/CFD vs futures/spot (jeśli wynika ze screena)
-
-- STRUKTURA (price action):
-  - HH/HL/LH/LL, BOS/CHoCH, impuls vs korekta, siła/tempo ruchu
-  - range: górna/dolna krawędź, mid-range, fałszywe wybicia
-  - trendline/kanały: liczba dotknięć, nachylenie, retesty
-
-- POZIOMY / STREFY:
-  - HTF S/R, flip level (S↔R), wielokrotne testy i reakcje
-  - supply/demand (strefy podaży/popytu), reakcja ceny w strefie
-  - psychologiczne (00/50/100), open dnia/tygodnia/miesiąca, PDH/PDL (jeśli widać)
-  - FIBO (0.382/0.5/0.618, extensions 1.272/1.618) oraz pivoty — TYLKO jeśli rysowane/oznaczone lub oczywiste z kontekstu
-
-- LIQUIDITY / SMC:
-  - equal highs/lows, liquidity pools, sweep/stop-run i szybki powrót
-  - pułapki (breakout bez utrzymania), absorpcja w knocie
-  - FVG/imbalance, order block, mitigation/breaker, premium/discount (jeśli widoczne)
-
-- ŚWIECE / POTWIERDZENIA:
-  - korpus vs knoty, rejection, strong/weak close względem poziomu
-  - sekwencje świec (2–3), engulfing, pin bar/hammer/shooting star, inside bar, doji
-  - "follow-through" po wybiciu (czy jest kontynuacja czy gaśnięcie impulsu)
-  - momentum i dywergencje (tylko jeśli wskaźnik jest widoczny na screenie)
-
-- PATTERNY (klasyczne):
-  - double top/bottom, H&S, trójkąty, flagi/pennant, wedge, kanały
-
-- WOLUMEN / ORDER FLOW (TYLKO jeśli jest na screenie):
-  - spike/klimax, wolumen na wybiciu, absorpcja
-  - volume profile: POC/VAH/VAL, delta/CVD/footprint (jeśli widoczne)
-
-- WSKAŹNIKI (TYLKO jeśli są na screenie):
-  - MA/EMA/VWAP, RSI/MACD/Stoch, ADX, dywergencje (klasyczna/ukryta)
-
-- KORELACJE / KONTEKST RYNKU (jeśli dotyczy i masz podstawę w kontekście):
-  - krypto: kierunek BTC/ETH jako filtr dla altów
-  - indeksy: risk-on/off, VIX/DXY/obligacje (nie wymyślaj — tylko gdy użytkownik podał lub widać w kontekście)
-
-- EGZEKUCJA (plan):
-  - typ wejścia (market/limit) + trigger (BOS/CHoCH, retest, świeca potwierdzająca)
-  - SL poza liquidity pool / poza strefą invalidacji (nie pod lokalnym dołkiem)
-  - TP na logicznych celach (S/R, liquidity, swing), RR i realizm względem zmienności
-  - anty-sygnały: co mówi "nie wchodź" (sprzeczność TF, wejście w środek range, long pod oporem itd.)
-  - scenariusze alternatywne: co musi się stać, żeby zmienić bias (np. CHoCH na LTF lub BOS na HTF)
-"""
     instruction = f"""
 Jesteś profesjonalnym analitykiem tradingowym.
 Twoim zadaniem jest NAJPIERW ocenić, czy obraz przedstawia realny wykres cenowy (screen wykresu), a dopiero potem przygotować plan transakcyjny.
@@ -473,33 +418,180 @@ Parametry:
 - ryzyko na trade: {risk_fraction} (część kapitału, np. 0.02 = 2%)
 - kontekst/news (AUTO, bez pytania użytkownika; może być puste): {news_context or "BRAK"}
 
-Analiza techniczna (uwzględnij WSZYSTKO co widać na screenie):
-{TECHNICAL_ANALYSIS_CHECKLIST}
 
-Zasady decyzyjne:
-1) Ustaw is_chart=false TYLKO jeśli obraz WYRAŹNIE nie zawiera wykresu cenowego (np. selfie, dokument, strona tekstowa, puste tło).
-   - wtedy: signal="NO_TRADE", confidence ≤ 20, entry/stop_loss/position_size = null, take_profit = []
-2) Jeśli na obrazie WIDAĆ wykres (nawet mały fragment w oknie przeglądarki) ustaw is_chart=true.
-   - Jeśli wykres jest zbyt oddalony/nieczytelny i nie da się odczytać liczb z osi (entry/SL/TP), NIE zgaduj.
-     Zamiast tego ustaw signal="NO_TRADE" oraz w issues dodaj np. "wykres zbyt mały/nieczytelny" / "nieczytelna oś ceny".
-3) Jeśli to wykres i da się logicznie zdefiniować entry/SL, preferuj LONG/SHORT.
-   NO_TRADE ustaw WYŁĄCZNIE w sytuacjach krytycznych:
-   - brak czytelnych danych do policzenia entry/SL/TP (np. oś ceny/czasu nieczytelna) LUB
-   - rynek jest w "burzy" (ekstremalna zmienność/whipsaw bez struktury) i nie da się logicznie zdefiniować entry/SL.
-   W NO_TRADE: confidence ≤ 50, entry/stop_loss/position_size = null, take_profit = [], a w setup 1 zdanie dlaczego.
-4) Jeśli wybierasz LONG/SHORT, podaj konkretnie: entry, stop_loss, take_profit (TP1/TP2/TP3) oraz invalidation.
-   Confidence ustaw realistycznie (np. 55-80). Nie zawyżaj.
+Analiza techniczna — PEŁNA CHECKLISTA (rozważ TYLKO to, co widać na screenie; nie zgaduj niewidocznych danych):
 
-Uzasadnienie (WYMAGANE, ma być GŁĘBOKIE i konkretne):
-- Zawsze uzupełnij pole rationale.
-- Dla LONG/SHORT podaj 8–14 krótkich punktów.
-- Każdy punkt MUSI odnosić się do rzeczy widocznych na screenie i musi zaczynać się od TAGU w nawiasach kwadratowych:
-  [STRUKTURA] [S/R] [LIQUIDITY] [ŚWIECE] [WZORY] [WOLUMEN] [WSKAŹNIKI] [ZMIENNOŚĆ] [KORELACJA] [PLAN] [ANTY]
-  (Używaj tylko tych tagów; jeśli coś nie jest widoczne, pomiń daną kategorię.)
-- Minimalnie WYMAGANE tagi dla LONG/SHORT: [STRUKTURA], [S/R], [LIQUIDITY], [ŚWIECE], [PLAN], [ANTY].
-  [PLAN] musi zawierać: dlaczego entry jest TU + czy to market czy limit + gdzie jest invalidation.
-  [ANTY] musi zawierać: 1–2 realne powody, które mogą unieważnić setup (np. opór z HTF, brak BOS, whipsaw).
-- Jeżeli nie jesteś w stanie spełnić wymogów (brak czytelności / brak twardych przesłanek), ustaw NO_TRADE.
+- Kontekst i warunki wykresu
+- Interwał (M1/M5/M15/H1/H4/D1/W1) i jego „sens” dla danego instrumentu
+- Multi-timeframe: trend/struktura z HTF + wejście na LTF
+- Rodzaj wykresu (świece/Heikin Ashi/Renko/Line) i ryzyko zniekształceń
+- Skala (logarytmiczna vs liniowa) – wpływ na S/R i trendline
+- Jakość screena: czytelność osi ceny/czasu, widoczność świec, zoom
+- Sesja (Azja/Londyn/NY), rollover, „dead hours”
+- Zmienność bieżąca vs średnia (czy rynek jest „rozkręcony”)
+- Trend rynku szerokiego (risk-on/off), wpływ indeksów, VIX (jeśli dotyczy)
+
+- Struktura rynku (market structure / price action)
+- Sekwencja HH/HL/LH/LL na danym TF
+- BOS (Break of Structure) – gdzie, jakim impulsem, czy po konsolidacji
+- CHoCH (Change of Character) – pierwszy sygnał zmiany kierunku
+- Pullback / retracement: czy jest „zdrowy” czy agresywny
+- Impuls vs korekta: czy ruch ma cechy impulsu (szybkość, zasięg, świece)
+- Range / konsolidacja: górna/dolna granica, środek range (mid)
+- Trendline i kanały: dotknięcia, fałszywe wybicia, nachylenie
+- Swing points: jak rynek reaguje na poprzednie swing high/low
+- Mikrostuktura na LTF: małe BOS/CHoCH zgodne lub przeciw HTF
+
+- Support / Resistance i strefy
+- Poziomy horyzontalne z HTF (najważniejsze)
+- Strefy podaży/popytu (supply/demand) – skąd wyszedł impuls
+- Flip level (S↔R) – potwierdzenia po przełamaniu
+- Reakcje na poziomie: odrzucenie vs przebicie vs re-test
+- Liczba testów poziomu (im więcej, tym słabszy / albo „bardziej oczywisty”)
+- „Clean” poziom vs „brudny” (wiele knotów i chaos)
+- Confluence: poziom + trendline + fib + VWAP + MA itp.
+- Poziomy psychologiczne (00/50/100), round numbers
+- Poziomy otwarcia dnia/tygodnia/miesiąca
+- Pivots (klasyczne, Camarilla) – jeśli używasz
+
+- Liquidity (płynność), polowania i pułapki
+- Equal highs / equal lows (magnes na płynność)
+- Sweep (zamiatanie) nad/pod poziomem i szybki powrót
+- Stop run / liquidity grab: objawy (knot, szybki rejection)
+- Breakout, który nie utrzymał się (bull/bear trap)
+- Wick into level + zamknięcie świecy po drugiej stronie (potwierdzenie pułapki)
+- Strefy obvious liquidity: nad konsolidacją, nad swing high, pod swing low
+- Gdzie powinien być SL: poza liquidity pool, nie „pod lokalnym dołkiem”
+- Thin liquidity (puste przestrzenie) – ryzyko szybkich przeskoków
+- Fair Value Gap / imbalance (jeśli używasz SMC/ICT)
+- Mitigation / fill imbalance – czy rynek wraca „domknąć” nieefektywność
+
+- Order blocks / SMC (jeśli widoczne)
+- Order block: ostatnia świeca przeciwna przed impulsem
+- Czy OB jest fresh (nietestowany) czy już mitigowany
+- Mitigation move: czy cena wróciła „zebrać” zlecenia i dopiero ruszyć
+- Breaker block: OB, który po wybiciu staje się strefą oporu/wsparcia
+- Premium/discount względem range (czy longujesz w premium – ryzyko)
+- Dealing range: skąd do dokąd, gdzie jest equilibrium
+- Internal vs external liquidity (wewnątrz struktury vs swingowe)
+
+- Świece i price action (candlestick analysis)
+- Rodzaj świecy: impulsowa / niezdecydowania / odrzuceniowa
+- Długość korpusu vs knoty (stosunek, dominacja strony)
+- Górny/dolny knot: rejection, absorpcja, „sprężyna”
+- Zamknięcie świecy (close) względem poziomu: nad/pod/na poziomie
+- Sekwencje świec: 2–3 świece potwierdzające (continuation / reversal)
+- Pin bar / hammer / shooting star (z kontekstem poziomu)
+- Engulfing (objęcie) – czy wybija strukturę czy tylko „szum”
+- Inside bar / mother bar – kompresja, potencjał wybicia
+- Doji – miejsce i znaczenie (na oporze vs w środku range)
+- Gap (FX/indeksy): zamknięcie luki, reakcja
+- Strong close vs weak close (zamknięcie przy high/low świecy)
+
+- Formacje klasyczne (patterns)
+- Double top / double bottom + sweep liquidity
+- Head & Shoulders / inverted H&S (i gdzie jest neckline)
+- Trójkąty: symetryczny / rosnący / malejący
+- Flagi i chorągiewki (kontynuacja trendu)
+- Wedge (klin): rising/falling – często wybicia przeciw trendline
+- Rounding top/bottom (rzadziej, ale bywa)
+- Cup & handle (jeśli czytelne)
+
+- Wolumen i pochodne wolumenu (tylko jeśli widoczne)
+- Wolumen: rośnie na impulsie / maleje na korekcie (zdrowy trend)
+- Wolumen na wybiciu poziomu: potwierdzenie vs „puste wybicie”
+- Wolumen na świecy odrzuceniowej (absorpcja)
+- Volume spike na końcu ruchu (climax volume) – możliwy zwrot
+- OBV, Volume Profile (jeśli używasz i jest na screenie)
+- POC, VAH, VAL (profil wolumenu) – magnetyzm ceny
+- Delta/footprint/CVD (jeśli masz i widać)
+- Absorpcja vs agresja (kupujący uderzają, ale cena nie idzie)
+
+- Zmienność i ryzyko (volatility / range)
+- ATR (średni zasięg) – czy SL/TP są realistyczne
+- Rozszerzenia zmienności po newsach – ryzyko spike & fade
+- Szerokość Bollinger Bands (kompresja → ekspansja) – jeśli widać
+- Chop market: whipsaw, brak follow-through
+- Średni zasięg impulsu vs korekty (czy edge jeszcze działa)
+
+- Wskaźniki (tylko jeśli widoczne; wtórnie)
+- MA/EMA: kierunek, nachylenie, położenie ceny względem MA
+- Krzyżowania MA jako filtr
+- RSI: trend RSI, dywergencje, overbought/oversold w trendzie
+- MACD: momentum, dywergencje, linia sygnałowa
+- Stochastic: timing w range, dywergencje
+- VWAP (session/anchored): mean reversion, wsparcie/opór
+- Ichimoku: filtr (jeśli ktoś używa)
+- ADX: siła trendu vs range
+- Supertrend / Parabolic SAR: trailing (jeśli widać)
+
+- Dywergencje i momentum
+- Dywergencja klasyczna i ukryta (kontynuacja)
+- Momentum świec (czy impuls słabnie: mniejsze korpusy, więcej knotów)
+- Brak follow-through po wybiciu (sygnał słabości)
+
+- Fibo (jeśli używasz i ma sens)
+- 0.382/0.5/0.618 retracement w trendzie
+- 0.786 jako głęboki pullback
+- Extensions 1.272/1.618 jako TP (z kontekstem)
+- Confluence fibo z poziomem HTF / OB / VWAP
+
+- Ważne ceny z czasu (time-based)
+- High/Low dnia poprzedniego (PDH/PDL)
+- High/Low tygodnia/miesiąca
+- Open dnia/tygodnia/miesiąca
+- London high/low, NY open (jeśli dotyczy)
+- Sweep PDH/PDL i powrót – częsty setup
+
+- Korelacje i kontekst międzyrynkowy (jako filtr)
+- Korelacja z rynkiem bazowym (alty vs BTC, indeksy vs indeksy)
+- DXY/obligacje/VIX – filtr trend/chop (bez zmyślania danych)
+- Dominacja BTC (w krypto) – filtr risk-on/off
+- Relatywna siła (instrument robi nowe high gdy rynek stoi)
+
+- Instrument-specyficzne
+- Spread, płynność, godziny handlu (CFD vs futures vs spot)
+- Luki/rollover (FX/indeksy), weekendy (krypto)
+- Tick size / minimalny SL / zasady brokera (praktyka)
+
+- Egzekucja: wejście/wyjście i scenariusze
+- Typ wejścia: market vs limit
+- Trigger: BOS/CHoCH, retest, świeca potwierdzająca
+- Invalidation: co musi się stać, żeby setup był nieaktualny
+- SL poza liquidity pool / poza invalidacją
+- TP na logicznych poziomach (swing, S/R, liquidity, fib)
+- RR i realizm (czy zasięg jest do zrobienia)
+- Scaling out / BE / trailing po strukturze (jeśli sensowne)
+
+- Anty-sygnały (co psuje trade)
+- Long pod HTF oporem bez wybicia i retestu
+- Short nad HTF wsparciem bez przełamania
+- Wejście w środku range (bez przewagi)
+- SL w obvious liquidity
+- TP bez celu (w powietrzu)
+- Brak potwierdzenia strukturalnego
+- Sprzeczność TF bez sygnału zmiany
+
+Zasady decyzyjne (WAŻNE — bez wyjątku):
+1) NO_TRADE wolno zwrócić TYLKO gdy:
+   - is_chart=false (brak wykresu na screenie), LUB
+   - wykres jest tak nieczytelny, że nie da się podać liczb entry/SL/TP (np. brak/nieczytelna oś ceny).
+2) Jeśli is_chart=true i da się odczytać ceny → ZAWSZE wybierz LONG albo SHORT (nigdy NO_TRADE).
+   - Jeśli nie ma „idealnego” setupu, wybierz kierunek zgodny z dominującą strukturą (HTF→LTF) i ustaw wejście SPRYTNIE:
+     preferuj LIMIT (pullback/retest do wsparcia/oporu, OB, strefy popytu/podaży) zamiast market.
+   - Confidence może być niska (np. 35–60), ale plan musi być logiczny.
+3) Dla LONG/SHORT zawsze podaj: entry, stop_loss, take_profit (TP1/TP2/TP3) oraz invalidation (jasny warunek unieważnienia).
+4) Nie zgaduj niewidocznych wskaźników/wolumenu/newsów. Jeśli czegoś nie widać, pomiń to w uzasadnieniu.
+
+Uzasadnienie (WYMAGANE):
+- Dla LONG/SHORT wypisz 8–14 krótkich punktów (myślniki), konkret z wykresu.
+  Minimum musi się pojawić:
+  - 2 punkty o strukturze (BOS/CHoCH / HH-HL / LH-LL / range),
+  - 2 punkty o S/R lub strefach,
+  - 2 punkty o liquidity i/lub świecach (sweep/rejection/knoty/pułapki),
+  - 1 punkt [PLAN]: czy entry to market czy LIMIT i dlaczego właśnie tam,
+  - 1 punkt [ANTY]: co jest największym ryzykiem / co neguje trade.
+- Jeśli wykres jest nieczytelny i nie da się podać liczb → wtedy (i tylko wtedy) NO_TRADE + 1–3 powody w rationale i issues.
 
 Zarządzanie ryzykiem:
 - Ryzyko nominalne = kapitał * ryzyko_na_trade. Jeśli nie da się policzyć precyzyjnej wielkości pozycji (bo brak odległości do SL), podaj formułę i przykład (np. 'Ryzyko = 20 USDT; wielkość pozycji = 20 / (Entry-SL)').
@@ -512,33 +604,32 @@ Format:
 - Zwróć WYŁĄCZNIE obiekt JSON zgodny ze schematem (bez Markdown, bez dodatkowego tekstu).
 - Nie składaj obietnic zysków ani pewników. Maksymalnie rzeczowo.
 """
+    def _call_openai(instruction_text: str) -> dict:
+        resp = client.responses.create(
+            model=OPENAI_MODEL,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": instruction_text.strip()},
+                        {"type": "input_image", "image_url": image_url},
+                    ],
+                }
+            ],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    # The API requires `text.format.name` for json_schema.
+                    "name": "trade_plan",
+                    "schema": schema,
+                    "strict": True,
+                }
+            },
+        )
+        out = (resp.output_text or "").strip()
+        return json.loads(out)
 
-    resp = client.responses.create(
-        model=OPENAI_MODEL,
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": instruction.strip()},
-                    {"type": "input_image", "image_url": image_url},
-                ],
-            }
-        ],
-        text={
-            "format": {
-                "type": "json_schema",
-                # The API requires `text.format.name` for json_schema.
-                "name": "trade_plan",
-                "schema": schema,
-                "strict": True,
-            }
-        },
-    )
-
-    # Structured outputs should return valid JSON in output_text.
-    out = (resp.output_text or "").strip()
-
-    result = json.loads(out)
+    result = _call_openai(instruction)
 
     # -----------------
     # Post-validate guardrails (keep output strict, avoid nonsense trades)
@@ -578,6 +669,43 @@ Format:
         sig = "NO_TRADE"
     result["signal"] = sig
 
+    def _issues_blob(res: dict) -> str:
+        parts = []
+        try:
+            parts.append(str(res.get("setup") or ""))
+        except Exception:
+            pass
+        iss = res.get("issues") or []
+        if isinstance(iss, list):
+            parts.extend([str(x) for x in iss if str(x).strip()])
+        else:
+            parts.append(str(iss))
+        return " ".join(parts).lower()
+
+    def _unreadable_or_missing_prices(res: dict) -> bool:
+        blob = _issues_blob(res)
+        # If the model says it's unreadable / missing axes, accept NO_TRADE.
+        keywords = [
+            "nieczytel", "zbyt mał", "brak osi", "brak świec", "brak wykres",
+            "nie widać osi", "nie widać ceny", "brak ceny", "brak czasu", "rozmyt",
+        ]
+        return any(k in blob for k in keywords)
+
+    # If it's a chart, we prefer ALWAYS LONG/SHORT (NO_TRADE only for unreadable/missing prices).
+    if sig == "NO_TRADE" and not _unreadable_or_missing_prices(result):
+        force_trade_instruction = instruction + "\n\nDODATKOWA REGUŁA: Jeśli is_chart=true i ceny są czytelne, MUSISZ zwrócić LONG albo SHORT. NO_TRADE wolno tylko gdy nie da się odczytać cen z osi (brak/nieczytelna oś ceny). Preferuj LIMIT entry w lepszej strefie zamiast market, jeśli nie ma idealnego setupu."
+        try:
+            result = _call_openai(force_trade_instruction)
+        except Exception:
+            # If retry fails, keep the original result.
+            pass
+
+        sig = str(result.get("signal") or "NO_TRADE").upper()
+        if sig not in ("LONG", "SHORT", "NO_TRADE"):
+            _force_no_trade("NO_TRADE: nieprawidłowy sygnał.")
+            sig = "NO_TRADE"
+        result["signal"] = sig
+
     # Ensure NO_TRADE fields are clean.
     if sig == "NO_TRADE":
         result["entry"] = None
@@ -588,60 +716,33 @@ Format:
             result["rationale"] = [str(result.get("rationale") or "")][:3]
         return result
 
-    # For LONG/SHORT require a deep, tagged rationale (prevents "guess trades").
+    # Normalize rationale list (does not block trades).
     rat = result.get("rationale")
     if not isinstance(rat, list):
         rat = [str(rat)] if rat else []
     rat = [str(x).strip() for x in rat if str(x).strip()]
+    # Keep it readable; UI will list items.
+    result["rationale"] = rat[:14]
 
-    # Keep it readable in UI.
-    rat = rat[:14]
-    result["rationale"] = rat
 
-    def _norm(s: str) -> str:
-        # Normalize Polish diacritics for robust tag checks.
-        return (
-            s.upper()
-            .replace("Ś", "S")
-            .replace("Ę", "E")
-            .replace("Ł", "L")
-            .replace("Ó", "O")
-            .replace("Ą", "A")
-            .replace("Ż", "Z")
-            .replace("Ź", "Z")
-            .replace("Ć", "C")
-            .replace("Ń", "N")
-        )
-
-    def _extract_tag(line: str) -> str:
-        s = line.strip()
-        s = re.sub(r"^[-•\u2022\s]+", "", s)
-        m = re.match(r"^\[([^\]]+)\]", s)
-        if not m:
-            return ""
-        return "[" + _norm(m.group(1).strip()) + "]"
-
-    # Minimum depth + required categories.
-    if len(result["rationale"]) < 8:
-        _force_no_trade("NO_TRADE: uzasadnienie zbyt płytkie (wymagane 8+ konkretnych punktów z wykresu).")
+    # If model picked LONG/SHORT but couldn't provide numbers, treat as unreadable -> NO_TRADE.
+    if result.get("entry") is None or result.get("stop_loss") is None:
+        _force_no_trade("NO_TRADE: brak czytelnych cen do ustawienia entry/SL (sprawdź czy oś ceny jest widoczna).")
         return result
 
-    tags = {_extract_tag(x) for x in result["rationale"]}
-    required = {"[STRUKTURA]", "[S/R]", "[LIQUIDITY]", "[SWIECE]", "[PLAN]", "[ANTY]"}
-    # Allow the model to output [ŚWIECE] which normalizes to [SWIECE]
-    if not required.issubset(tags):
-        _force_no_trade("NO_TRADE: brak wymaganych kategorii w uzasadnieniu ([STRUKTURA][S/R][LIQUIDITY][ŚWIECE][PLAN][ANTY]).")
-        return result
-
-    # Extra sanity: PLAN bullet should mention market/limit and invalidation (best-effort).
-    plan_lines = [x for x in result["rationale"] if _extract_tag(x) == "[PLAN]"]
-    if plan_lines:
-        pl = _norm(" ".join(plan_lines))
-        has_type = ("MARKET" in pl) or ("LIMIT" in pl) or ("LMT" in pl)
-        has_inv = ("INVALID" in pl) or ("INWALID" in pl) or ("UNIEW" in pl)
-        if not (has_type and has_inv):
-            _force_no_trade("NO_TRADE: [PLAN] musi jasno zawierać typ wejścia (market/limit) i warunek invalidacji.")
-            return result
+    # Ensure take_profit has at least one level; if missing, derive a conservative TP1 from R:R≈1:2.
+    if not isinstance(result.get("take_profit"), list):
+        result["take_profit"] = []
+    if len(result.get("take_profit") or []) == 0:
+        e = _first_number(result.get("entry"))
+        sl = _first_number(result.get("stop_loss"))
+        if e is not None and sl is not None:
+            if sig == "LONG" and e > sl:
+                tp1 = e + 2.0 * (e - sl)
+                result["take_profit"] = [f"{tp1:.2f}"]
+            elif sig == "SHORT" and sl > e:
+                tp1 = e - 2.0 * (sl - e)
+                result["take_profit"] = [f"{tp1:.2f}"]
 
     # Sanity-check numeric direction (best-effort).
     entry_n = _first_number(result.get("entry"))
