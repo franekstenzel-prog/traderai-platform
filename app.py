@@ -407,6 +407,61 @@ def analyze_with_openai(
             "explanation",
         ],
     }
+
+    # Full technical-analysis checklist injected into the prompt.
+    # IMPORTANT: The model must only reference items that are actually visible on the screenshot.
+    TECHNICAL_ANALYSIS_CHECKLIST = """
+CHECKLIST (rozważ tylko to, co widać na screenie; NICZEGO nie zgaduj):
+
+- KONTEKST / WARUNKI:
+  - TF/MTF (trend z HTF + wejście na LTF), jakość screena (czytelność osi, zoom)
+  - sesja (Azja/Londyn/NY), "dead hours", luki/rollover (jeśli widoczne)
+  - zmienność (range/ATR/BB width jeśli widoczne), czy rynek jest trendowy czy "chop"
+  - instrument-specyficzne: spread/płynność/CFD vs futures/spot (jeśli wynika ze screena)
+
+- STRUKTURA (price action):
+  - HH/HL/LH/LL, BOS/CHoCH, impuls vs korekta, siła/tempo ruchu
+  - range: górna/dolna krawędź, mid-range, fałszywe wybicia
+  - trendline/kanały: liczba dotknięć, nachylenie, retesty
+
+- POZIOMY / STREFY:
+  - HTF S/R, flip level (S↔R), wielokrotne testy i reakcje
+  - supply/demand (strefy podaży/popytu), reakcja ceny w strefie
+  - psychologiczne (00/50/100), open dnia/tygodnia/miesiąca, PDH/PDL (jeśli widać)
+  - FIBO (0.382/0.5/0.618, extensions 1.272/1.618) oraz pivoty — TYLKO jeśli rysowane/oznaczone lub oczywiste z kontekstu
+
+- LIQUIDITY / SMC:
+  - equal highs/lows, liquidity pools, sweep/stop-run i szybki powrót
+  - pułapki (breakout bez utrzymania), absorpcja w knocie
+  - FVG/imbalance, order block, mitigation/breaker, premium/discount (jeśli widoczne)
+
+- ŚWIECE / POTWIERDZENIA:
+  - korpus vs knoty, rejection, strong/weak close względem poziomu
+  - sekwencje świec (2–3), engulfing, pin bar/hammer/shooting star, inside bar, doji
+  - "follow-through" po wybiciu (czy jest kontynuacja czy gaśnięcie impulsu)
+  - momentum i dywergencje (tylko jeśli wskaźnik jest widoczny na screenie)
+
+- PATTERNY (klasyczne):
+  - double top/bottom, H&S, trójkąty, flagi/pennant, wedge, kanały
+
+- WOLUMEN / ORDER FLOW (TYLKO jeśli jest na screenie):
+  - spike/klimax, wolumen na wybiciu, absorpcja
+  - volume profile: POC/VAH/VAL, delta/CVD/footprint (jeśli widoczne)
+
+- WSKAŹNIKI (TYLKO jeśli są na screenie):
+  - MA/EMA/VWAP, RSI/MACD/Stoch, ADX, dywergencje (klasyczna/ukryta)
+
+- KORELACJE / KONTEKST RYNKU (jeśli dotyczy i masz podstawę w kontekście):
+  - krypto: kierunek BTC/ETH jako filtr dla altów
+  - indeksy: risk-on/off, VIX/DXY/obligacje (nie wymyślaj — tylko gdy użytkownik podał lub widać w kontekście)
+
+- EGZEKUCJA (plan):
+  - typ wejścia (market/limit) + trigger (BOS/CHoCH, retest, świeca potwierdzająca)
+  - SL poza liquidity pool / poza strefą invalidacji (nie pod lokalnym dołkiem)
+  - TP na logicznych celach (S/R, liquidity, swing), RR i realizm względem zmienności
+  - anty-sygnały: co mówi "nie wchodź" (sprzeczność TF, wejście w środek range, long pod oporem itd.)
+  - scenariusze alternatywne: co musi się stać, żeby zmienić bias (np. CHoCH na LTF lub BOS na HTF)
+"""
     instruction = f"""
 Jesteś profesjonalnym analitykiem tradingowym.
 Twoim zadaniem jest NAJPIERW ocenić, czy obraz przedstawia realny wykres cenowy (screen wykresu), a dopiero potem przygotować plan transakcyjny.
@@ -419,12 +474,7 @@ Parametry:
 - kontekst/news (AUTO, bez pytania użytkownika; może być puste): {news_context or "BRAK"}
 
 Analiza techniczna (uwzględnij WSZYSTKO co widać na screenie):
-- struktura rynku (trend, swing highs/lows, BOS/CHoCH)
-- poziomy wsparcia/oporu, reakcji ceny, wielokrotne testy
-- liquidity: sweepy, liquidity pools, equal highs/lows, stop hunts
-- formacje świecowe i zachowanie knotów/korpusu (impuls vs. dystrybucja)
-- strefy podaży/popytu, order blocks, fair value gaps/imbalances (jeśli widoczne)
-- wolumen/indikatory tylko jeśli są na screenie (nie zgaduj niewidocznych danych)
+{TECHNICAL_ANALYSIS_CHECKLIST}
 
 Zasady decyzyjne:
 1) Ustaw is_chart=false TYLKO jeśli obraz WYRAŹNIE nie zawiera wykresu cenowego (np. selfie, dokument, strona tekstowa, puste tło).
@@ -440,12 +490,16 @@ Zasady decyzyjne:
 4) Jeśli wybierasz LONG/SHORT, podaj konkretnie: entry, stop_loss, take_profit (TP1/TP2/TP3) oraz invalidation.
    Confidence ustaw realistycznie (np. 55-80). Nie zawyżaj.
 
-Uzasadnienie (WYMAGANE):
+Uzasadnienie (WYMAGANE, ma być GŁĘBOKIE i konkretne):
 - Zawsze uzupełnij pole rationale.
-- Dla LONG/SHORT podaj 3–6 krótkich punktów, każdy MUSI odnosić się do rzeczy widocznych na screenie.
-  Minimum: 1 punkt o strukturze (BOS/CHoCH / HH-HL / LH-LL), 1 o S/R lub strefie podaży/popytu, 1 o liquidity lub świecach (np. sweep, rejection, knoty).
-  Dodatkowo: przynajmniej 1 punkt ma wyjaśnić DLACZEGO entry jest na danym poziomie (np. pullback do wsparcia / retest) i czy to wejście "market" czy "limit".
-- Jeżeli nie jesteś w stanie podać min. 3 konkretnych punktów (bo wykres za mały/nieczytelny lub brak twardych sygnałów), ustaw NO_TRADE.
+- Dla LONG/SHORT podaj 8–14 krótkich punktów.
+- Każdy punkt MUSI odnosić się do rzeczy widocznych na screenie i musi zaczynać się od TAGU w nawiasach kwadratowych:
+  [STRUKTURA] [S/R] [LIQUIDITY] [ŚWIECE] [WZORY] [WOLUMEN] [WSKAŹNIKI] [ZMIENNOŚĆ] [KORELACJA] [PLAN] [ANTY]
+  (Używaj tylko tych tagów; jeśli coś nie jest widoczne, pomiń daną kategorię.)
+- Minimalnie WYMAGANE tagi dla LONG/SHORT: [STRUKTURA], [S/R], [LIQUIDITY], [ŚWIECE], [PLAN], [ANTY].
+  [PLAN] musi zawierać: dlaczego entry jest TU + czy to market czy limit + gdzie jest invalidation.
+  [ANTY] musi zawierać: 1–2 realne powody, które mogą unieważnić setup (np. opór z HTF, brak BOS, whipsaw).
+- Jeżeli nie jesteś w stanie spełnić wymogów (brak czytelności / brak twardych przesłanek), ustaw NO_TRADE.
 
 Zarządzanie ryzykiem:
 - Ryzyko nominalne = kapitał * ryzyko_na_trade. Jeśli nie da się policzyć precyzyjnej wielkości pozycji (bo brak odległości do SL), podaj formułę i przykład (np. 'Ryzyko = 20 USDT; wielkość pozycji = 20 / (Entry-SL)').
@@ -534,15 +588,60 @@ Format:
             result["rationale"] = [str(result.get("rationale") or "")][:3]
         return result
 
-    # For LONG/SHORT require at least 3 concrete rationale points.
+    # For LONG/SHORT require a deep, tagged rationale (prevents "guess trades").
     rat = result.get("rationale")
     if not isinstance(rat, list):
         rat = [str(rat)] if rat else []
     rat = [str(x).strip() for x in rat if str(x).strip()]
-    result["rationale"] = rat[:6]
-    if len(result["rationale"]) < 3:
-        _force_no_trade("NO_TRADE: brak wystarczającego, konkretnego uzasadnienia setupu z wykresu.")
+
+    # Keep it readable in UI.
+    rat = rat[:14]
+    result["rationale"] = rat
+
+    def _norm(s: str) -> str:
+        # Normalize Polish diacritics for robust tag checks.
+        return (
+            s.upper()
+            .replace("Ś", "S")
+            .replace("Ę", "E")
+            .replace("Ł", "L")
+            .replace("Ó", "O")
+            .replace("Ą", "A")
+            .replace("Ż", "Z")
+            .replace("Ź", "Z")
+            .replace("Ć", "C")
+            .replace("Ń", "N")
+        )
+
+    def _extract_tag(line: str) -> str:
+        s = line.strip()
+        s = re.sub(r"^[-•\u2022\s]+", "", s)
+        m = re.match(r"^\[([^\]]+)\]", s)
+        if not m:
+            return ""
+        return "[" + _norm(m.group(1).strip()) + "]"
+
+    # Minimum depth + required categories.
+    if len(result["rationale"]) < 8:
+        _force_no_trade("NO_TRADE: uzasadnienie zbyt płytkie (wymagane 8+ konkretnych punktów z wykresu).")
         return result
+
+    tags = {_extract_tag(x) for x in result["rationale"]}
+    required = {"[STRUKTURA]", "[S/R]", "[LIQUIDITY]", "[SWIECE]", "[PLAN]", "[ANTY]"}
+    # Allow the model to output [ŚWIECE] which normalizes to [SWIECE]
+    if not required.issubset(tags):
+        _force_no_trade("NO_TRADE: brak wymaganych kategorii w uzasadnieniu ([STRUKTURA][S/R][LIQUIDITY][ŚWIECE][PLAN][ANTY]).")
+        return result
+
+    # Extra sanity: PLAN bullet should mention market/limit and invalidation (best-effort).
+    plan_lines = [x for x in result["rationale"] if _extract_tag(x) == "[PLAN]"]
+    if plan_lines:
+        pl = _norm(" ".join(plan_lines))
+        has_type = ("MARKET" in pl) or ("LIMIT" in pl) or ("LMT" in pl)
+        has_inv = ("INVALID" in pl) or ("INWALID" in pl) or ("UNIEW" in pl)
+        if not (has_type and has_inv):
+            _force_no_trade("NO_TRADE: [PLAN] musi jasno zawierać typ wejścia (market/limit) i warunek invalidacji.")
+            return result
 
     # Sanity-check numeric direction (best-effort).
     entry_n = _first_number(result.get("entry"))
