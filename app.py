@@ -368,6 +368,12 @@ def analyze_with_openai(
             "invalidation": {"type": "string", "description": "Jasny warunek unieważnienia setupu (np. 'powrót poniżej X')"},
             "issues": {"type": "array", "items": {"type": "string"}, "description": "Lista problemów/uwag dot. jakości screena (brak osi ceny, nieczytelny interwał, itp.)"},
 
+            "rationale": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Krótkie uzasadnienie decyzji (konkretnie co na wykresie przemawia za LONG/SHORT albo dlaczego NO_TRADE).",
+            },
+
             "news": {
                 "type": "object",
                 "additionalProperties": False,
@@ -396,6 +402,7 @@ def analyze_with_openai(
             "risk",
             "invalidation",
             "issues",
+            "rationale",
             "news",
             "explanation",
         ],
@@ -433,6 +440,13 @@ Zasady decyzyjne:
 4) Jeśli wybierasz LONG/SHORT, podaj konkretnie: entry, stop_loss, take_profit (TP1/TP2/TP3) oraz invalidation.
    Confidence ustaw realistycznie (np. 55-80). Nie zawyżaj.
 
+Uzasadnienie (WYMAGANE):
+- Zawsze uzupełnij pole rationale.
+- Dla LONG/SHORT podaj 3–6 krótkich punktów, każdy MUSI odnosić się do rzeczy widocznych na screenie.
+  Minimum: 1 punkt o strukturze (BOS/CHoCH / HH-HL / LH-LL), 1 o S/R lub strefie podaży/popytu, 1 o liquidity lub świecach (np. sweep, rejection, knoty).
+  Dodatkowo: przynajmniej 1 punkt ma wyjaśnić DLACZEGO entry jest na danym poziomie (np. pullback do wsparcia / retest) i czy to wejście "market" czy "limit".
+- Jeżeli nie jesteś w stanie podać min. 3 konkretnych punktów (bo wykres za mały/nieczytelny lub brak twardych sygnałów), ustaw NO_TRADE.
+
 Zarządzanie ryzykiem:
 - Ryzyko nominalne = kapitał * ryzyko_na_trade. Jeśli nie da się policzyć precyzyjnej wielkości pozycji (bo brak odległości do SL), podaj formułę i przykład (np. 'Ryzyko = 20 USDT; wielkość pozycji = 20 / (Entry-SL)').
 
@@ -469,7 +483,89 @@ Format:
 
     # Structured outputs should return valid JSON in output_text.
     out = (resp.output_text or "").strip()
-    return json.loads(out)
+
+    result = json.loads(out)
+
+    # -----------------
+    # Post-validate guardrails (keep output strict, avoid nonsense trades)
+    # -----------------
+    def _first_number(val: object) -> Optional[float]:
+        if val is None:
+            return None
+        s = str(val)
+        m = re.search(r"[-+]?\d+(?:[\.,]\d+)?", s)
+        if not m:
+            return None
+        try:
+            return float(m.group(0).replace(",", "."))
+        except Exception:
+            return None
+
+    def _force_no_trade(reason: str, max_conf: int = 50):
+        result["signal"] = "NO_TRADE"
+        result["setup"] = reason
+        result["confidence"] = min(int(result.get("confidence") or 0), max_conf)
+        result["entry"] = None
+        result["stop_loss"] = None
+        result["position_size"] = None
+        result["take_profit"] = []
+
+    # If it's not a chart, it must be NO_TRADE.
+    if not bool(result.get("is_chart")):
+        _force_no_trade("NO_TRADE: brak czytelnego wykresu na screenie.", max_conf=20)
+        # keep rationale (if any) but ensure it's a list
+        if not isinstance(result.get("rationale"), list):
+            result["rationale"] = [str(result.get("rationale") or "")][:3]
+        return result
+
+    sig = str(result.get("signal") or "NO_TRADE").upper()
+    if sig not in ("LONG", "SHORT", "NO_TRADE"):
+        _force_no_trade("NO_TRADE: nieprawidłowy sygnał.")
+        sig = "NO_TRADE"
+    result["signal"] = sig
+
+    # Ensure NO_TRADE fields are clean.
+    if sig == "NO_TRADE":
+        result["entry"] = None
+        result["stop_loss"] = None
+        result["position_size"] = None
+        result["take_profit"] = []
+        if not isinstance(result.get("rationale"), list):
+            result["rationale"] = [str(result.get("rationale") or "")][:3]
+        return result
+
+    # For LONG/SHORT require at least 3 concrete rationale points.
+    rat = result.get("rationale")
+    if not isinstance(rat, list):
+        rat = [str(rat)] if rat else []
+    rat = [str(x).strip() for x in rat if str(x).strip()]
+    result["rationale"] = rat[:6]
+    if len(result["rationale"]) < 3:
+        _force_no_trade("NO_TRADE: brak wystarczającego, konkretnego uzasadnienia setupu z wykresu.")
+        return result
+
+    # Sanity-check numeric direction (best-effort).
+    entry_n = _first_number(result.get("entry"))
+    sl_n = _first_number(result.get("stop_loss"))
+    tp0_n = _first_number((result.get("take_profit") or [None])[0])
+
+    if sig == "LONG" and entry_n is not None and sl_n is not None:
+        if sl_n >= entry_n:
+            _force_no_trade("NO_TRADE: niespójne poziomy (dla LONG SL powinien być poniżej entry).")
+            return result
+        if tp0_n is not None and tp0_n <= entry_n:
+            _force_no_trade("NO_TRADE: niespójne poziomy (dla LONG TP powinien być powyżej entry).")
+            return result
+
+    if sig == "SHORT" and entry_n is not None and sl_n is not None:
+        if sl_n <= entry_n:
+            _force_no_trade("NO_TRADE: niespójne poziomy (dla SHORT SL powinien być powyżej entry).")
+            return result
+        if tp0_n is not None and tp0_n >= entry_n:
+            _force_no_trade("NO_TRADE: niespójne poziomy (dla SHORT TP powinien być poniżej entry).")
+            return result
+
+    return result
 
 
 # -----------------------------

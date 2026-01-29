@@ -48,6 +48,17 @@
               <div class="trade-box__value">{{ result.stop_loss }}</div>
             </div>
           </div>
+
+          {% if result.rationale is defined and result.rationale and result.rationale|length %}
+            <details class="trade-why">
+              <summary>Uzasadnienie</summary>
+              <ul>
+                {% for line in result.rationale %}
+                  <li>{{ line }}</li>
+                {% endfor %}
+              </ul>
+            </details>
+          {% endif %}
         {% else %}
           <div class="muted" style="margin-top:10px">
             {{ result.setup }}

@@ -355,6 +355,28 @@ textarea{resize:vertical; min-height:78px}
   font-size:13px;
 }
 
+.trade-why{
+  margin-top:12px;
+  padding-top:10px;
+  border-top:1px solid rgba(255,255,255,.08);
+}
+.trade-why summary{
+  cursor:pointer;
+  user-select:none;
+  color: var(--muted);
+  font-weight:800;
+  letter-spacing:.02em;
+}
+.trade-why summary:hover{color: var(--text)}
+.trade-why ul{
+  margin:10px 0 0 18px;
+  padding:0;
+}
+.trade-why li{
+  margin:6px 0;
+  line-height:1.35;
+}
+
 @media (max-width: 980px){
   .trade-grid{grid-template-columns:1fr}
   .signal-banner{min-width:auto}
