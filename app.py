@@ -346,7 +346,7 @@ def analyze_with_openai(
             "pair": {"type": "string"},
             "timeframe": {"type": "string"},
 
-            "is_chart": {"type": "boolean", "description": "Czy obraz wygląda na prawdziwy screen wykresu cenowego (np. świece/line chart z osią ceny i czasu)"},
+            "is_chart": {"type": "boolean", "description": "Czy obraz zawiera screen wykresu cenowego (np. świece/line chart). Nawet jeśli wykres jest tylko częścią ekranu, ustaw true."},
             "signal": {"type": "string", "enum": ["LONG", "SHORT", "NO_TRADE"], "description": "Jasny sygnał: LONG/SHORT lub NO_TRADE, jeśli brak czytelnego setupu"},
             "confidence": {"type": "integer", "minimum": 0, "maximum": 100, "description": "Pewność sygnału w skali 0-100"},
 
@@ -420,16 +420,17 @@ Analiza techniczna (uwzględnij WSZYSTKO co widać na screenie):
 - wolumen/indikatory tylko jeśli są na screenie (nie zgaduj niewidocznych danych)
 
 Zasady decyzyjne:
-1) Jeśli to NIE jest wykres (np. randomowy obraz, brak świec i osi ceny/czasu), ustaw:
-   - is_chart=false, signal="NO_TRADE", confidence ≤ 20
-   - entry/stop_loss/position_size = null, take_profit = []
-   - w setup oraz explanation krótko napisz, że to nie jest wykres i czego brakuje.
-2) Jeśli to wykres, preferuj LONG/SHORT zawsze gdy da się wyznaczyć kierunek i sensowny setup.
+1) Ustaw is_chart=false TYLKO jeśli obraz WYRAŹNIE nie zawiera wykresu cenowego (np. selfie, dokument, strona tekstowa, puste tło).
+   - wtedy: signal="NO_TRADE", confidence ≤ 20, entry/stop_loss/position_size = null, take_profit = []
+2) Jeśli na obrazie WIDAĆ wykres (nawet mały fragment w oknie przeglądarki) ustaw is_chart=true.
+   - Jeśli wykres jest zbyt oddalony/nieczytelny i nie da się odczytać liczb z osi (entry/SL/TP), NIE zgaduj.
+     Zamiast tego ustaw signal="NO_TRADE" oraz w issues dodaj np. "wykres zbyt mały/nieczytelny" / "nieczytelna oś ceny".
+3) Jeśli to wykres i da się logicznie zdefiniować entry/SL, preferuj LONG/SHORT.
    NO_TRADE ustaw WYŁĄCZNIE w sytuacjach krytycznych:
-   - screen jest nieczytelny / brak kluczowych informacji (oś ceny/czasu, interwał) LUB
+   - brak czytelnych danych do policzenia entry/SL/TP (np. oś ceny/czasu nieczytelna) LUB
    - rynek jest w "burzy" (ekstremalna zmienność/whipsaw bez struktury) i nie da się logicznie zdefiniować entry/SL.
    W NO_TRADE: confidence ≤ 50, entry/stop_loss/position_size = null, take_profit = [], a w setup 1 zdanie dlaczego.
-3) Jeśli wybierasz LONG/SHORT, podaj konkretnie: entry, stop_loss, take_profit (TP1/TP2/TP3) oraz invalidation.
+4) Jeśli wybierasz LONG/SHORT, podaj konkretnie: entry, stop_loss, take_profit (TP1/TP2/TP3) oraz invalidation.
    Confidence ustaw realistycznie (np. 55-80). Nie zawyżaj.
 
 Zarządzanie ryzykiem:

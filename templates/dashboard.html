@@ -133,7 +133,7 @@
               {% endif %}
             </div>
 
-            {% if result.signal != "NO_TRADE" and result.is_chart %}
+            {% if result.signal != "NO_TRADE" %}
               <div class="trade-grid">
                 <div class="trade-box trade-box--entry">
                   <div class="trade-box__label">Entry</div>
@@ -161,7 +161,11 @@
             {% else %}
               <div class="muted" style="margin-top:10px">
                 {{ result.setup }}
-                {% if not result.is_chart %}<div class="muted" style="margin-top:6px">To nie wygląda na wykres. Wgraj screen z wykresu (świece + oś ceny i czasu).</div>{% endif %}
+                {% if not result.is_chart %}
+                  <div class="muted" style="margin-top:6px">
+                    Nie widzę wykresu na screenie. Jeśli wgrywasz cały ekran, przytnij/zbliż do samego wykresu (świece + oś ceny i czasu).
+                  </div>
+                {% endif %}
               </div>
             {% endif %}
           </div>
