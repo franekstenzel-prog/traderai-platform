@@ -1,44 +1,44 @@
 # TraderAI Platform
 
-Flask + SQLite + Stripe Subscriptions + OpenAI Vision (chart screenshot → plan transakcyjny).
+Flask + SQLite + Stripe Subscriptions + OpenAI Vision (chart screenshot → trade plan).
 
-## Funkcje
-- Rejestracja / logowanie
-- Dashboard (upload screena + parametry: para / interwał / kapitał / ryzyko)
-- Limity: Free = 3 analizy / miesiąc, Pro = nielimitowane
-- Stripe: subskrypcja miesięczna i roczna + Customer Portal
-- OpenAI: analiza screena i zwrot planu (entry, SL, TP, sizing, ryzyko)
+## Features
+- Sign up / log in
+- Dashboard (upload screenshot + parameters: symbol / timeframe / capital / risk)
+- Limits: Free = 3 analyses / month, Pro = unlimited
+- Stripe: monthly and yearly subscriptions + Customer Portal
+- OpenAI: screenshot analysis and a trade plan output (entry, SL, TP, sizing, risk)
 
-## Wymagane zmienne środowiskowe (Render → Environment)
+## Required environment variables (Render → Environment)
 
 ### Flask
-- `SECRET_KEY` – losowy długi string (ważne!)
+- `SECRET_KEY` – a long random string (important!)
 
 ### OpenAI
-- `OPENAI_API_KEY` – klucz z OpenAI
-- `OPENAI_MODEL` – opcjonalnie (domyślnie: `gpt-4o-mini`)
+- `OPENAI_API_KEY` – your OpenAI API key
+- `OPENAI_MODEL` – optional (default: `gpt-4o-mini`)
 
-### Stripe (subskrypcje)
+### Stripe (subscriptions)
 - `STRIPE_SECRET_KEY`
-- `STRIPE_PUBLISHABLE_KEY` (opcjonalne – UI)
+- `STRIPE_PUBLISHABLE_KEY` (optional – used by the UI)
 - `STRIPE_WEBHOOK_SECRET`
-- `STRIPE_PRICE_MONTHLY` – Price ID dla planu miesięcznego (99 PLN)
-- `STRIPE_PRICE_YEARLY` – Price ID dla planu rocznego (12×99 PLN - 10%)
+- `STRIPE_PRICE_MONTHLY` – Price ID for the monthly plan
+- `STRIPE_PRICE_YEARLY` – Price ID for the yearly plan
 
-## Webhook Stripe
-W Stripe ustaw endpoint webhook:
-- URL: `https://<twoj-render-url>/stripe/webhook`
+## Stripe Webhook
+In Stripe, configure a webhook endpoint:
+- URL: `https://<your-render-url>/stripe/webhook`
 - Events (minimum):
   - `checkout.session.completed`
   - `customer.subscription.created`
   - `customer.subscription.updated`
   - `customer.subscription.deleted`
 
-Skopiuj `Signing secret` do `STRIPE_WEBHOOK_SECRET`.
+Copy the `Signing secret` into `STRIPE_WEBHOOK_SECRET`.
 
 ## Render
 - Build command: `pip install -r requirements.txt`
 - Start command: `gunicorn app:app`
 
-## Uwaga
-Wynik analizy ma charakter edukacyjny i nie stanowi porady inwestycyjnej.
+## Disclaimer
+Analysis outputs are for educational purposes only and are not investment advice.

@@ -330,7 +330,7 @@ def analyze_with_openai(
     news_context: str = "",
 ) -> dict:
     if not OPENAI_API_KEY:
-        raise RuntimeError("Brak OPENAI_API_KEY w zmiennych środowiskowych.")
+        raise RuntimeError("Missing OPENAI_API_KEY in environment variables.")
 
     from openai import OpenAI  # lazy import
 
@@ -346,32 +346,32 @@ def analyze_with_openai(
             "pair": {"type": "string"},
             "timeframe": {"type": "string"},
 
-            "is_chart": {"type": "boolean", "description": "Czy obraz zawiera screen wykresu cenowego (np. świece/line chart). Nawet jeśli wykres jest tylko częścią ekranu, ustaw true."},
-            "signal": {"type": "string", "enum": ["LONG", "SHORT", "NO_TRADE"], "description": "Jasny sygnał: LONG/SHORT lub NO_TRADE, jeśli brak czytelnego setupu"},
-            "confidence": {"type": "integer", "minimum": 0, "maximum": 100, "description": "Pewność sygnału w skali 0-100"},
+            "is_chart": {"type": "boolean", "description": "Whether the image contains a price chart screenshot (candles/line chart). Even if the chart is only part of the screen, set true."},
+            "signal": {"type": "string", "enum": ["LONG", "SHORT", "NO_TRADE"], "description": "Clear signal: LONG/SHORT or NO_TRADE only if a plan cannot be produced."},
+            "confidence": {"type": "integer", "minimum": 0, "maximum": 100, "description": "Confidence score 0-100."},
 
-            "setup": {"type": "string", "description": "Nazwa setupu i warunki jego ważności (albo powód NO_TRADE)"},
-            "entry": {"type": ["string", "null"], "description": "Konkretny entry (liczba lub zakres) albo null przy NO_TRADE"},
-            "stop_loss": {"type": ["string", "null"], "description": "Konkretny stop-loss (liczba lub zakres) albo null przy NO_TRADE"},
+            "setup": {"type": "string", "description": "Setup name and validity conditions (or the reason for NO_TRADE)."},
+            "entry": {"type": ["string", "null"], "description": "Concrete entry (number or range) or null for NO_TRADE."},
+            "stop_loss": {"type": ["string", "null"], "description": "Concrete stop-loss (number or range) or null for NO_TRADE."},
             "take_profit": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "TP1/TP2/TP3 (liczby lub zakresy); może być puste przy NO_TRADE",
+                "description": "TP1/TP2/TP3 (numbers or ranges); may be empty for NO_TRADE.",
             },
 
             "position_size": {
                 "type": ["string", "null"],
-                "description": "Rozmiar pozycji / ekspozycja bazując na kapitale i ryzyku; null przy NO_TRADE",
+                "description": "Position size / exposure based on capital and risk; null for NO_TRADE.",
             },
 
-            "risk": {"type": "string", "description": "Ryzyko, co może pójść nie tak; co psuje setup"},
-            "invalidation": {"type": "string", "description": "Jasny warunek unieważnienia setupu (np. 'powrót poniżej X')"},
-            "issues": {"type": "array", "items": {"type": "string"}, "description": "Lista problemów/uwag dot. jakości screena (brak osi ceny, nieczytelny interwał, itp.)"},
+            "risk": {"type": "string", "description": "Key risks: what can go wrong; what breaks the setup."},
+            "invalidation": {"type": "string", "description": "Clear invalidation condition (e.g., 'back below X')."},
+            "issues": {"type": "array", "items": {"type": "string"}, "description": "Issues/notes about screenshot quality (missing axes, unreadable timeframe, etc.)."},
 
             "rationale": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Krótkie uzasadnienie decyzji (konkretnie co na wykresie przemawia za LONG/SHORT albo dlaczego NO_TRADE).",
+                "description": "Short rationale (what on the chart supports LONG/SHORT or why NO_TRADE).",
             },
 
             "news": {
@@ -386,7 +386,7 @@ def analyze_with_openai(
                 "required": ["mode", "impact", "summary", "key_points"],
             },
 
-            "explanation": {"type": "string", "description": "Krótkie, profesjonalne wyjaśnienie (bez obietnic zysków)"},
+            "explanation": {"type": "string", "description": "Short, professional explanation (no profit promises)."},
         },
         "required": [
             "pair",
@@ -408,18 +408,20 @@ def analyze_with_openai(
         ],
     }
     instruction = f"""
-Jesteś profesjonalnym analitykiem tradingowym.
-Twoim zadaniem jest NAJPIERW ocenić, czy obraz przedstawia realny wykres cenowy (screen wykresu), a dopiero potem przygotować plan transakcyjny.
+You are a professional trading analyst.
+Your job is to FIRST decide whether the image contains a real price chart (a chart screenshot), and only then produce a trade plan.
 
-Parametry:
-- para: {pair}
-- interwał: {timeframe}
-- kapitał: {capital}
-- ryzyko na trade: {risk_fraction} (część kapitału, np. 0.02 = 2%)
-- kontekst/news (AUTO, bez pytania użytkownika; może być puste): {news_context or "BRAK"}
+LANGUAGE: English only. Every text field in the JSON must be in English.
+
+Inputs:
+- symbol/pair: {pair}
+- timeframe: {timeframe}
+- capital: {capital}
+- risk per trade: {risk_fraction} (fraction of capital, e.g., 0.02 = 2%)
+- news context (AUTO; do not ask the user; may be empty): {news_context or "NONE"}
 
 
-Analiza techniczna — PEŁNA CHECKLISTA (rozważ TYLKO to, co widać na screenie; nie zgaduj niewidocznych danych):
+Technical analysis — FULL CHECKLIST (consider ONLY what is visible in the screenshot; do not guess unseen data):
 
 - Kontekst i warunki wykresu
 - Interwał (M1/M5/M15/H1/H4/D1/W1) i jego „sens” dla danego instrumentu
@@ -572,37 +574,37 @@ Analiza techniczna — PEŁNA CHECKLISTA (rozważ TYLKO to, co widać na screeni
 - Brak potwierdzenia strukturalnego
 - Sprzeczność TF bez sygnału zmiany
 
-Zasady decyzyjne (WAŻNE — bez wyjątku):
-1) NO_TRADE wolno zwrócić TYLKO gdy:
-   - is_chart=false (brak wykresu na screenie), LUB
-   - wykres jest tak nieczytelny, że nie da się podać liczb entry/SL/TP (np. brak/nieczytelna oś ceny).
-2) Jeśli is_chart=true i da się odczytać ceny → ZAWSZE wybierz LONG albo SHORT (nigdy NO_TRADE).
-   - Jeśli nie ma „idealnego” setupu, wybierz kierunek zgodny z dominującą strukturą (HTF→LTF) i ustaw wejście SPRYTNIE:
-     preferuj LIMIT (pullback/retest do wsparcia/oporu, OB, strefy popytu/podaży) zamiast market.
-   - Confidence może być niska (np. 35–60), ale plan musi być logiczny.
-3) Dla LONG/SHORT zawsze podaj: entry, stop_loss, take_profit (TP1/TP2/TP3) oraz invalidation (jasny warunek unieważnienia).
-4) Nie zgaduj niewidocznych wskaźników/wolumenu/newsów. Jeśli czegoś nie widać, pomiń to w uzasadnieniu.
+Decision rules (IMPORTANT — no exceptions):
+1) You may return NO_TRADE ONLY when:
+   - is_chart=false (no chart in the screenshot), OR
+   - the chart is so unreadable that you cannot provide numeric entry/SL/TP (e.g., missing or unreadable price axis).
+2) If is_chart=true and prices are readable → ALWAYS choose LONG or SHORT (never NO_TRADE).
+   - If there is no “perfect” setup, pick the direction that matches the dominant structure (HTF→LTF) and set entry smartly:
+     prefer LIMIT (pullback/retest to support/resistance, order block, supply/demand) instead of market.
+   - Confidence may be low (e.g., 35–60), but the plan must still be logical and executable.
+3) For LONG/SHORT always provide: entry, stop_loss, take_profit (TP1/TP2/TP3) and invalidation.
+4) Do not hallucinate indicators/volume/news that are not visible. If you can’t see it, don’t mention it.
 
-Uzasadnienie (WYMAGANE):
-- Dla LONG/SHORT wypisz 8–14 krótkich punktów (myślniki), konkret z wykresu.
-  Minimum musi się pojawić:
-  - 2 punkty o strukturze (BOS/CHoCH / HH-HL / LH-LL / range),
-  - 2 punkty o S/R lub strefach,
-  - 2 punkty o liquidity i/lub świecach (sweep/rejection/knoty/pułapki),
-  - 1 punkt [PLAN]: czy entry to market czy LIMIT i dlaczego właśnie tam,
-  - 1 punkt [ANTY]: co jest największym ryzykiem / co neguje trade.
-- Jeśli wykres jest nieczytelny i nie da się podać liczb → wtedy (i tylko wtedy) NO_TRADE + 1–3 powody w rationale i issues.
+Rationale (REQUIRED):
+- For LONG/SHORT output 8–14 short bullet points (hyphen bullets), based on what is visible on the chart.
+  Minimum must include:
+  - 2 bullets about structure (BOS/CHoCH / HH-HL / LH-LL / range),
+  - 2 bullets about support/resistance or zones,
+  - 2 bullets about liquidity and/or candles (sweep/rejection/wicks/traps),
+  - 1 bullet [PLAN]: market vs LIMIT entry and why that location,
+  - 1 bullet [RISK]: biggest risk / what invalidates the trade.
+- If the chart is unreadable and you cannot provide numbers → then (and only then) NO_TRADE + 1–3 reasons in rationale and issues.
 
-Zarządzanie ryzykiem:
-- Ryzyko nominalne = kapitał * ryzyko_na_trade. Jeśli nie da się policzyć precyzyjnej wielkości pozycji (bo brak odległości do SL), podaj formułę i przykład (np. 'Ryzyko = 20 USDT; wielkość pozycji = 20 / (Entry-SL)').
+Risk management:
+- Nominal risk = capital * risk_per_trade. If you can’t compute an exact position size (e.g., because the distance to SL is unclear), provide the formula and a brief example.
 
-Newsy:
-- Jeżeli kontekst/news jest pusty, ustaw news.mode="not_provided" i impact="UNKNOWN". Nie pytaj użytkownika o newsy.
-- Jeżeli kontekst/news jest podany (w tym AUTO_NEWS), ustaw news.mode="user_provided" i oceń wpływ (impact) bez zmyślania faktów.
+News:
+- If news context is empty, set news.mode="not_provided" and impact="UNKNOWN". Do not ask the user for news.
+- If news context is provided (including AUTO_NEWS), set news.mode="user_provided" and assess impact without making up facts.
 
 Format:
-- Zwróć WYŁĄCZNIE obiekt JSON zgodny ze schematem (bez Markdown, bez dodatkowego tekstu).
-- Nie składaj obietnic zysków ani pewników. Maksymalnie rzeczowo.
+- Return ONLY the JSON object that matches the schema (no Markdown, no extra text).
+- No profit promises. Be factual and concise.
 """
     def _call_openai(instruction_text: str) -> dict:
         resp = client.responses.create(
@@ -657,7 +659,7 @@ Format:
 
     # If it's not a chart, it must be NO_TRADE.
     if not bool(result.get("is_chart")):
-        _force_no_trade("NO_TRADE: brak czytelnego wykresu na screenie.", max_conf=20)
+        _force_no_trade("NO_TRADE: no readable price chart in the screenshot.", max_conf=20)
         # keep rationale (if any) but ensure it's a list
         if not isinstance(result.get("rationale"), list):
             result["rationale"] = [str(result.get("rationale") or "")][:3]
@@ -665,7 +667,7 @@ Format:
 
     sig = str(result.get("signal") or "NO_TRADE").upper()
     if sig not in ("LONG", "SHORT", "NO_TRADE"):
-        _force_no_trade("NO_TRADE: nieprawidłowy sygnał.")
+        _force_no_trade("NO_TRADE: invalid signal.")
         sig = "NO_TRADE"
     result["signal"] = sig
 
@@ -686,6 +688,11 @@ Format:
         blob = _issues_blob(res)
         # If the model says it's unreadable / missing axes, accept NO_TRADE.
         keywords = [
+            # English
+            "unreadable", "too small", "blurry", "out of focus", "low resolution",
+            "no price axis", "missing price axis", "no time axis", "missing time axis",
+            "no candles", "no chart", "cannot see price", "cannot read", "cropped",
+            # Polish (backward compatibility)
             "nieczytel", "zbyt mał", "brak osi", "brak świec", "brak wykres",
             "nie widać osi", "nie widać ceny", "brak ceny", "brak czasu", "rozmyt",
         ]
@@ -693,7 +700,7 @@ Format:
 
     # If it's a chart, we prefer ALWAYS LONG/SHORT (NO_TRADE only for unreadable/missing prices).
     if sig == "NO_TRADE" and not _unreadable_or_missing_prices(result):
-        force_trade_instruction = instruction + "\n\nDODATKOWA REGUŁA: Jeśli is_chart=true i ceny są czytelne, MUSISZ zwrócić LONG albo SHORT. NO_TRADE wolno tylko gdy nie da się odczytać cen z osi (brak/nieczytelna oś ceny). Preferuj LIMIT entry w lepszej strefie zamiast market, jeśli nie ma idealnego setupu."
+        force_trade_instruction = instruction + "\n\nEXTRA RULE: If is_chart=true and prices are readable, you MUST return LONG or SHORT. NO_TRADE is allowed only when you cannot read prices from the axes (missing/unreadable price axis). Prefer a LIMIT entry in a better zone instead of market if there is no perfect setup."
         try:
             result = _call_openai(force_trade_instruction)
         except Exception:
@@ -702,7 +709,7 @@ Format:
 
         sig = str(result.get("signal") or "NO_TRADE").upper()
         if sig not in ("LONG", "SHORT", "NO_TRADE"):
-            _force_no_trade("NO_TRADE: nieprawidłowy sygnał.")
+            _force_no_trade("NO_TRADE: invalid signal.")
             sig = "NO_TRADE"
         result["signal"] = sig
 
@@ -727,7 +734,7 @@ Format:
 
     # If model picked LONG/SHORT but couldn't provide numbers, treat as unreadable -> NO_TRADE.
     if result.get("entry") is None or result.get("stop_loss") is None:
-        _force_no_trade("NO_TRADE: brak czytelnych cen do ustawienia entry/SL (sprawdź czy oś ceny jest widoczna).")
+        _force_no_trade("NO_TRADE: missing readable prices to set entry/SL (make sure the price axis is visible).")
         return result
 
     # Ensure take_profit has at least one level; if missing, derive a conservative TP1 from R:R≈1:2.
@@ -751,18 +758,18 @@ Format:
 
     if sig == "LONG" and entry_n is not None and sl_n is not None:
         if sl_n >= entry_n:
-            _force_no_trade("NO_TRADE: niespójne poziomy (dla LONG SL powinien być poniżej entry).")
+            _force_no_trade("NO_TRADE: inconsistent levels (for LONG, SL must be below entry).")
             return result
         if tp0_n is not None and tp0_n <= entry_n:
-            _force_no_trade("NO_TRADE: niespójne poziomy (dla LONG TP powinien być powyżej entry).")
+            _force_no_trade("NO_TRADE: inconsistent levels (for LONG, TP must be above entry).")
             return result
 
     if sig == "SHORT" and entry_n is not None and sl_n is not None:
         if sl_n <= entry_n:
-            _force_no_trade("NO_TRADE: niespójne poziomy (dla SHORT SL powinien być powyżej entry).")
+            _force_no_trade("NO_TRADE: inconsistent levels (for SHORT, SL must be above entry).")
             return result
         if tp0_n is not None and tp0_n >= entry_n:
-            _force_no_trade("NO_TRADE: niespójne poziomy (dla SHORT TP powinien być poniżej entry).")
+            _force_no_trade("NO_TRADE: inconsistent levels (for SHORT, TP must be below entry).")
             return result
 
     return result
@@ -812,10 +819,10 @@ def login_post():
     db = get_db()
     row = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
     if not row or not check_password_hash(row["password_hash"], password):
-        flash("Nieprawidłowy email lub hasło.", "error")
+        flash("Invalid email or password.", "error")
         return redirect(url_for("login"))
     session["uid"] = row["id"]
-    flash("Zalogowano.", "ok")
+    flash("Logged in.", "ok")
     return redirect(url_for("dashboard"))
 
 
@@ -831,7 +838,7 @@ def signup_post():
     email = (request.form.get("email") or "").strip().lower()
     password = request.form.get("password") or ""
     if not email or not password:
-        flash("Uzupełnij email i hasło.", "error")
+        flash("Please provide an email and password.", "error")
         return redirect(url_for("signup"))
 
     db = get_db()
@@ -848,12 +855,12 @@ def signup_post():
         )
         db.commit()
     except sqlite3.IntegrityError:
-        flash("Konto o tym emailu już istnieje.", "error")
+        flash("An account with this email already exists.", "error")
         return redirect(url_for("signup"))
 
     uid = db.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()["id"]
     session["uid"] = uid
-    flash("Konto utworzone. Możesz zacząć analizować.", "ok")
+    flash("Account created. You can start analyzing.", "ok")
     return redirect(url_for("dashboard"))
 
 
@@ -862,7 +869,7 @@ def logout():
     from flask import session
 
     session.clear()
-    flash("Wylogowano.", "ok")
+    flash("Logged out.", "ok")
     return redirect(url_for("index"))
 
 
@@ -908,7 +915,7 @@ def analysis_view(analysis_id: int):
         (analysis_id, user["id"]),
     ).fetchone()
     if not row:
-        flash("Nie znaleziono analizy.", "error")
+        flash("Analysis not found.", "error")
         return redirect(url_for("dashboard"))
 
     result = json.loads(row["result_json"])
@@ -936,7 +943,7 @@ def analyze():
     user = current_user()
 
     if not can_analyze(user):
-        flash("Limit analiz w tym miesiącu został wykorzystany. Przejdź na Pro.", "error")
+        flash("Monthly analysis limit reached. Upgrade to Pro.", "error")
         return redirect(url_for("pricing"))
 
     # Inputs
@@ -1006,7 +1013,7 @@ def analyze():
     db.execute("UPDATE users SET analyses_used = analyses_used + 1 WHERE id = ?", (user["id"],))
     db.commit()
 
-    flash("Analiza gotowa.", "ok")
+    flash("Analysis ready.", "ok")
     return redirect(url_for("dashboard"))
 
 
@@ -1021,7 +1028,7 @@ def _stripe_ready() -> bool:
 @login_required
 def billing_checkout():
     if not _stripe_ready():
-        flash("Płatności nie są skonfigurowane (Stripe).", "error")
+        flash("Payments are not configured (Stripe).", "error")
         return redirect(url_for("pricing"))
 
     user = current_user()
@@ -1060,7 +1067,49 @@ def billing_checkout():
 @app.get("/billing/success")
 @login_required
 def billing_success():
-    flash("Płatność rozpoczęta. Jeśli webhooki Stripe są poprawnie ustawione, plan zmieni się automatycznie.", "ok")
+    # We try to confirm the subscription immediately (in addition to webhooks),
+    # so the user sees a clear message and the plan is updated without waiting.
+    if not _stripe_ready():
+        flash("Payments are not configured (Stripe).", "error")
+        return redirect(url_for("pricing"))
+
+    session_id = (request.args.get("session_id") or "").strip()
+    if not session_id:
+        flash("Payment completed.", "ok")
+        return redirect(url_for("dashboard"))
+
+    try:
+        s = stripe.checkout.Session.retrieve(session_id, expand=["subscription"])
+        meta = s.get("metadata") or {}
+        plan = (meta.get("plan") or "").strip() or None
+        sub = s.get("subscription")
+        sub_id = None
+        status = None
+        if isinstance(sub, dict):
+            sub_id = sub.get("id")
+            status = sub.get("status")
+
+        # Only update if this session belongs to the logged-in user (metadata user_id).
+        user = current_user()
+        meta_uid = int(meta.get("user_id", "0") or 0)
+        if user and meta_uid and meta_uid == int(user["id"]):
+            db = get_db()
+            if plan in ("pro_monthly", "pro_yearly"):
+                db.execute(
+                    "UPDATE users SET plan = ?, stripe_subscription_id = ?, stripe_status = ? WHERE id = ?",
+                    (plan, sub_id, status, user["id"]),
+                )
+                db.commit()
+
+        # Success message (no conditional Stripe-config text).
+        if plan == "pro_yearly":
+            flash("Switched to the yearly plan.", "ok")
+        else:
+            # default to monthly
+            flash("Switched to the monthly plan.", "ok")
+    except Exception:
+        flash("Payment completed.", "ok")
+
     return redirect(url_for("dashboard"))
 
 
@@ -1130,11 +1179,11 @@ def stripe_webhook():
 @login_required
 def billing_portal():
     if not STRIPE_SECRET_KEY:
-        flash("Stripe nie jest skonfigurowany.", "error")
+        flash("Stripe is not configured.", "error")
         return redirect(url_for("pricing"))
     user = current_user()
     if not user["stripe_customer_id"]:
-        flash("Brak klienta Stripe dla tego konta.", "error")
+        flash("No Stripe customer exists for this account.", "error")
         return redirect(url_for("pricing"))
 
     base_url = request.url_root.rstrip("/")

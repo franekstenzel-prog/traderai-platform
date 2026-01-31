@@ -1,23 +1,23 @@
 {% extends "base.html" %}
-{% block title %}TraderAI — Logowanie{% endblock %}
+{% block title %}TraderAI — Log in{% endblock %}
 {% block content %}
 <section class="auth">
   <div class="card auth__card">
-    <h1>Zaloguj się</h1>
-    <p class="muted">Dostęp do dashboardu i limitów.</p>
+    <h1>Log in</h1>
+    <p class="muted">Access the dashboard and your limits.</p>
 
     <form method="post" action="{{ url_for('login_post') }}" class="form">
       <label>Email</label>
       <input name="email" type="email" placeholder="you@example.com" required />
 
-      <label>Hasło</label>
+      <label>Password</label>
       <input name="password" type="password" placeholder="••••••••" required />
 
-      <button class="btn btn--primary w100" type="submit">Zaloguj</button>
+      <button class="btn btn--primary w100" type="submit">Log in</button>
     </form>
 
     <p class="muted" style="margin-top:12px">
-      Nie masz konta? <a href="{{ url_for('signup') }}">Załóż konto</a>
+      Don't have an account? <a href="{{ url_for('signup') }}">Sign up</a>
     </p>
   </div>
 </section>

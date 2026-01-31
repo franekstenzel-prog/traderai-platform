@@ -22,32 +22,32 @@
       {% endif %}
 
       <div class="kpi__row">
-        <span class="muted">Analizy (ten miesiąc)</span>
+        <span class="muted">Analyses (this month)</span>
         <span class="mono">{{ user['analyses_used'] }}</span>
       </div>
 
       {% if remaining is not none %}
       <div class="kpi__row">
-        <span class="muted">Pozostało</span>
+        <span class="muted">Remaining</span>
         <span class="mono">{{ remaining }}</span>
       </div>
       {% endif %}
 
       <div class="kpi__hint muted">
-        Free: {{ FREE_MONTHLY_LIMIT }}/mies. • Pro: nielimitowane
+        Free: {{ FREE_MONTHLY_LIMIT }}/mo • Pro: unlimited
       </div>
     </div>
 
     <div class="sidebar__actions">
-      <a class="btn btn--ghost" href="{{ url_for('pricing') }}">Cennik / Upgrade</a>
+      <a class="btn btn--ghost" href="{{ url_for('pricing') }}">Pricing / Upgrade</a>
       {% if user['stripe_customer_id'] %}
-        <a class="btn btn--ghost" href="{{ url_for('billing_portal') }}">Zarządzaj subskrypcją</a>
+        <a class="btn btn--ghost" href="{{ url_for('billing_portal') }}">Manage subscription</a>
       {% endif %}
-      <a class="btn btn--ghost" href="{{ url_for('logout') }}">Wyloguj</a>
+      <a class="btn btn--ghost" href="{{ url_for('logout') }}">Log out</a>
     </div>
 
     <div class="card card--inset" style="margin-top:14px">
-      <div class="muted" style="margin-bottom:8px">Ostatnie analizy</div>
+      <div class="muted" style="margin-bottom:8px">Recent analyses</div>
       {% if recent and recent|length %}
         <div class="list">
           {% for r in recent %}
@@ -58,58 +58,58 @@
           {% endfor %}
         </div>
       {% else %}
-        <div class="muted">Brak historii.</div>
+        <div class="muted">No history yet.</div>
       {% endif %}
     </div>
   </aside>
 
   <div class="dash__main">
     <div class="card">
-      <div class="card__title">Analiza screena</div>
+      <div class="card__title">Chart analysis</div>
       <div class="muted" style="margin-bottom:12px">
-        Wgraj screen wykresu. Dostaniesz: kierunek (long/short) + entry + take profit + stop loss.
+        Upload a chart screenshot. You will get: direction (long/short) + entry + take profit + stop loss.
       </div>
 
       {% if not openai_enabled %}
         <div class="toast toast--error">
-          Brak konfiguracji OpenAI (OPENAI_API_KEY). Analizy są chwilowo niedostępne.
+          OpenAI is not configured (OPENAI_API_KEY). Analyses are temporarily unavailable.
         </div>
       {% endif %}
 
       <form class="form" action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data">
         <div class="grid3">
           <label class="field">
-            <span class="field__label">Para</span>
-            <input name="pair" value="{{ user['default_pair'] or 'BTCUSDT' }}" placeholder="np. BTCUSDT" required />
+            <span class="field__label">Symbol</span>
+            <input name="pair" value="{{ user['default_pair'] or 'BTCUSDT' }}" placeholder="e.g. BTCUSDT" required />
           </label>
 
           <label class="field">
-            <span class="field__label">Interwał</span>
-            <input name="timeframe" value="{{ user['default_timeframe'] or '1H' }}" placeholder="np. 15M / 1H / 4H" required />
+            <span class="field__label">Timeframe</span>
+            <input name="timeframe" value="{{ user['default_timeframe'] or '1H' }}" placeholder="e.g. 15M / 1H / 4H" required />
           </label>
 
           <label class="field">
-            <span class="field__label">Kapitał</span>
-            <input name="capital" value="{{ user['default_capital'] or 1000 }}" inputmode="decimal" placeholder="np. 10000" required />
+            <span class="field__label">Capital</span>
+            <input name="capital" value="{{ user['default_capital'] or 1000 }}" inputmode="decimal" placeholder="e.g. 10000" required />
           </label>
         </div>
 
         <div class="grid3" style="margin-top:10px">
           <label class="field">
-            <span class="field__label">Ryzyko na trade</span>
-            <input name="risk_fraction" value="{{ user['default_risk_fraction'] or 0.02 }}" inputmode="decimal" placeholder="np. 0.02 = 2%" required />
-            <span class="field__hint muted">Podaj jako część kapitału (0.02 = 2%).</span>
+            <span class="field__label">Risk per trade</span>
+            <input name="risk_fraction" value="{{ user['default_risk_fraction'] or 0.02 }}" inputmode="decimal" placeholder="e.g. 0.02 = 2%" required />
+            <span class="field__hint muted">Enter as a fraction of capital (0.02 = 2%).</span>
           </label>
 
           <label class="field">
-            <span class="field__label">Screen (PNG/JPG/WEBP)</span>
+            <span class="field__label">Screenshot (PNG/JPG/WEBP)</span>
             <input name="chart" type="file" accept=".png,.jpg,.jpeg,.webp" required />
           </label>
 
           <div class="field">
-            <span class="field__label">Akcja</span>
-            <button class="btn btn--primary" type="submit" {% if not openai_enabled %}disabled{% endif %}>Analizuj</button>
-            <span class="field__hint muted">Limit Free: {{ FREE_MONTHLY_LIMIT }}/miesiąc. • Newsy pobierane automatycznie.</span>
+            <span class="field__label">Action</span>
+            <button class="btn btn--primary" type="submit" {% if not openai_enabled %}disabled{% endif %}>Analyze</button>
+            <span class="field__hint muted">Free limit: {{ FREE_MONTHLY_LIMIT }}/mo • News is fetched automatically.</span>
           </div>
         </div>
       </form>
@@ -118,7 +118,7 @@
     {% if last %}
       {% set result = last['result_json'] | loads %}
       <div class="card" style="margin-top:16px">
-        <div class="card__title">Ostatnia analiza</div>
+        <div class="card__title">Last analysis</div>
 
         <div class="grid2">
           <div class="card card--inset">
@@ -161,7 +161,7 @@
 
               {% if result.rationale is defined and result.rationale and result.rationale|length %}
                 <details class="trade-why">
-                  <summary>Uzasadnienie</summary>
+                  <summary>Rationale</summary>
                   <ul>
                     {% for line in result.rationale %}
                       <li>{{ line }}</li>
@@ -174,7 +174,7 @@
                 {{ result.setup }}
                 {% if not result.is_chart %}
                   <div class="muted" style="margin-top:6px">
-                    Nie widzę wykresu na screenie. Jeśli wgrywasz cały ekran, przytnij/zbliż do samego wykresu (świece + oś ceny i czasu).
+                    I can't see a readable price chart in this screenshot. If you're uploading a full desktop view, zoom in or crop to the chart area (candles + price axis + time axis).
                   </div>
                 {% endif %}
               </div>
@@ -182,13 +182,13 @@
           </div>
 
           <div class="card card--inset">
-            <div class="muted" style="margin-top:14px">Podgląd screena</div>
-            <img class="img-preview" src="data:{{ last['image_mime'] }};base64,{{ last['image_b64'] }}" alt="Wgrany screen" />
+            <div class="muted" style="margin-top:14px">Screenshot preview</div>
+            <img class="img-preview" src="data:{{ last['image_mime'] }};base64,{{ last['image_b64'] }}" alt="Uploaded screenshot" />
           </div>
         </div>
 
         <div class="muted" style="margin-top:10px">
-          Uwaga: To narzędzie ma charakter edukacyjny i nie stanowi porady inwestycyjnej.
+          Disclaimer: This tool is for educational purposes only and is not investment advice.
         </div>
       </div>
     {% endif %}

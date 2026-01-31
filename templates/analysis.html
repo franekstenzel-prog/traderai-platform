@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}TraderAI — Analiza{% endblock %}
+{% block title %}TraderAI — Analysis{% endblock %}
 {% block content %}
 <section class="container">
   <div class="breadcrumbs">
@@ -7,7 +7,7 @@
   </div>
 
   <div class="card" style="margin-top:12px">
-    <div class="card__title">Analiza #{{ row['id'] }}</div>
+    <div class="card__title">Analysis #{{ row['id'] }}</div>
     <div class="muted">{{ row['created_at'] }}</div>
 
     <div class="grid2" style="margin-top:14px">
@@ -51,7 +51,7 @@
 
           {% if result.rationale is defined and result.rationale and result.rationale|length %}
             <details class="trade-why">
-              <summary>Uzasadnienie</summary>
+              <summary>Rationale</summary>
               <ul>
                 {% for line in result.rationale %}
                   <li>{{ line }}</li>
@@ -62,19 +62,19 @@
         {% else %}
           <div class="muted" style="margin-top:10px">
             {{ result.setup }}
-            {% if not result.is_chart %}<div class="muted" style="margin-top:6px">To nie wygląda na wykres. Wgraj screen z wykresu (świece + oś ceny i czasu).</div>{% endif %}
+            {% if not result.is_chart %}<div class="muted" style="margin-top:6px">This does not look like a readable chart. Upload a screenshot with candles and both the price and time axes visible.</div>{% endif %}
           </div>
         {% endif %}
       </div>
 
       <div class="card card--inset">
-        <div class="muted" style="margin-top:14px">Podgląd screena</div>
-        <img class="img-preview" src="data:{{ row['image_mime'] }};base64,{{ row['image_b64'] }}" alt="Wgrany screen" />
+        <div class="muted" style="margin-top:14px">Screenshot preview</div>
+        <img class="img-preview" src="data:{{ row['image_mime'] }};base64,{{ row['image_b64'] }}" alt="Uploaded screenshot" />
       </div>
     </div>
 
     <div class="muted" style="margin-top:10px">
-      Uwaga: To narzędzie ma charakter edukacyjny i nie stanowi porady inwestycyjnej.
+      Disclaimer: This tool is for educational purposes only and is not investment advice.
     </div>
   </div>
 </section>

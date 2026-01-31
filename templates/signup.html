@@ -1,23 +1,23 @@
 {% extends "base.html" %}
-{% block title %}TraderAI — Rejestracja{% endblock %}
+{% block title %}TraderAI — Sign up{% endblock %}
 {% block content %}
 <section class="auth">
   <div class="card auth__card">
-    <h1>Załóż konto</h1>
-    <p class="muted">Free: {{ FREE_MONTHLY_LIMIT }} analizy / miesiąc.</p>
+    <h1>Create account</h1>
+    <p class="muted">Free: {{ FREE_MONTHLY_LIMIT }} analyses / month.</p>
 
     <form method="post" action="{{ url_for('signup_post') }}" class="form">
       <label>Email</label>
       <input name="email" type="email" placeholder="you@example.com" required />
 
-      <label>Hasło</label>
-      <input name="password" type="password" placeholder="min. 8 znaków" required />
+      <label>Password</label>
+      <input name="password" type="password" placeholder="min. 8 characters" required />
 
-      <button class="btn btn--primary w100" type="submit">Utwórz konto</button>
+      <button class="btn btn--primary w100" type="submit">Create account</button>
     </form>
 
     <p class="muted" style="margin-top:12px">
-      Masz konto? <a href="{{ url_for('login') }}">Zaloguj</a>
+      Already have an account? <a href="{{ url_for('login') }}">Log in</a>
     </p>
   </div>
 </section>
