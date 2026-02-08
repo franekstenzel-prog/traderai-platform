@@ -1197,3 +1197,13 @@ def billing_portal():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
+DB_PATH = os.environ.get("DB_PATH", "traderai.db")
+# Jeśli DB_PATH wskazuje na folder (np. /var/data), upewnij się że istnieje
+try:
+    _db_dir = os.path.dirname(DB_PATH)
+    if _db_dir:
+        os.makedirs(_db_dir, exist_ok=True)
+except Exception:
+    pass
+
