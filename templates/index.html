@@ -1,33 +1,33 @@
 {% extends "base.html" %}
-{% block title %}TraderAI — AI platform for traders{% endblock %}
+{% block title %}TraderAI — platforma AI dla traderów{% endblock %}
 {% block content %}
 
 <section class="hero">
   <div class="hero__left">
-    <div class="pill">AI platform for trade analysis</div>
-    <h1>Analyze trades like a professional trader.</h1>
+    <div class="pill">Platforma AI do analizy transakcji</div>
+    <h1>Analizuj trade’y jak profesjonalny trader.</h1>
     <p class="lead">
-      Upload a chart screenshot or paste a trade plan. You get analysis, risk framing, and a concrete plan.
-      No fluff.
+      Wgrywasz screen wykresu lub opis transakcji. Dostajesz analizę, ryzyko, plan i checklistę.
+      Bez lania wody.
     </p>
 
     <div class="hero__cta">
-      <a class="btn btn--primary" href="{{ url_for('signup') }}">Create a free account</a>
-      <a class="btn btn--ghost" href="#how-it-works">See how it works</a>
+      <a class="btn btn--primary" href="{{ url_for('signup') }}">Załóż darmowe konto</a>
+      <a class="btn btn--ghost" href="#jakdziala">Zobacz jak działa</a>
     </div>
 
     <div class="trust">
       <div class="trust__item">
         <div class="trust__big">10 000+</div>
-        <div class="muted">Traders served</div>
+        <div class="muted">Zaufanych traderów</div>
       </div>
       <div class="trust__item">
         <div class="trust__big">90%+</div>
-        <div class="muted">Accuracy (claim)</div>
+        <div class="muted">Skuteczności (claim)</div>
       </div>
       <div class="trust__item">
         <div class="trust__big">1 000 000+</div>
-        <div class="muted">Trades reviewed</div>
+        <div class="muted">Przeanalizowanych trade’ów</div>
       </div>
     </div>
   </div>
@@ -36,121 +36,121 @@
     <div class="card card--preview">
       <div class="card__head">
         <div class="dot"></div><div class="dot"></div><div class="dot"></div>
-        <span class="muted">Dashboard preview</span>
+        <span class="muted">Podgląd dashboardu</span>
       </div>
       <div class="preview">
-        <img class="preview__img" src="{{ url_for('static', filename='images/hero_chart.svg') }}" alt="Demo chart" />
+        <img class="preview__img" src="{{ url_for('static', filename='images/hero_chart.svg') }}" alt="Wykres demo" />
         <div class="preview__meta">
           <div class="meta__row"><span class="muted">Setup:</span><span>Breakout + retest</span></div>
-          <div class="meta__row"><span class="muted">R:R:</span><span>1:3.2</span></div>
-          <div class="meta__row"><span class="muted">Risk:</span><span>Medium</span></div>
+          <div class="meta__row"><span class="muted">RR:</span><span>1:3.2</span></div>
+          <div class="meta__row"><span class="muted">Ryzyko:</span><span>Średnie</span></div>
         </div>
       </div>
     </div>
   </div>
 </section>
 
-<section id="how-it-works" class="section">
+<section id="jakdziala" class="section">
   <div class="section__head">
-    <h2>How it works</h2>
-    <p class="muted">A quick 3-step walkthrough.</p>
+    <h2>Jak to działa</h2>
+    <p class="muted">Mały pokaz slajdów — 3 kroki.</p>
   </div>
 
   <div class="slider" data-slider>
     <div class="slide is-active">
       <div class="slide__num">01</div>
-      <div class="slide__title">Add your data</div>
-      <div class="slide__text">Upload a chart screenshot (PNG/JPG) or paste your trade plan.</div>
+      <div class="slide__title">Dodaj dane</div>
+      <div class="slide__text">Wgraj screen wykresu (PNG/JPG) albo wklej plan transakcji.</div>
     </div>
     <div class="slide">
       <div class="slide__num">02</div>
-      <div class="slide__title">AI analyzes</div>
-      <div class="slide__text">Trend, levels, risk, SL/TP, and execution mistakes.</div>
+      <div class="slide__title">AI analizuje</div>
+      <div class="slide__text">Trend, poziomy, ryzyko, SL/TP, błędy w egzekucji.</div>
     </div>
     <div class="slide">
       <div class="slide__num">03</div>
-      <div class="slide__title">You get the plan</div>
-      <div class="slide__text">Entry checklist, scenarios, and actionable recommendations.</div>
+      <div class="slide__title">Dostajesz plan</div>
+      <div class="slide__text">Checklistę wejścia, scenariusze i rekomendacje.</div>
     </div>
 
     <div class="slider__controls">
-      <button class="btn btn--ghost" type="button" data-prev>Back</button>
-      <button class="btn btn--ghost" type="button" data-next>Next</button>
+      <button class="btn btn--ghost" type="button" data-prev>Wstecz</button>
+      <button class="btn btn--ghost" type="button" data-next>Dalej</button>
     </div>
   </div>
 </section>
 
-<section id="features" class="section">
+<section id="funkcje" class="section">
   <div class="section__head">
-    <h2>Features</h2>
-    <p class="muted">Minimal. Concrete. No fairy tales.</p>
+    <h2>Funkcje</h2>
+    <p class="muted">Minimal. Konkret. Bez bajek.</p>
   </div>
 
   <div class="grid3">
     <div class="card">
-      <h3>Trade analysis</h3>
-      <p class="muted">Evaluate the setup, risk, R:R, mistakes, and execution quality.</p>
+      <h3>Analiza transakcji</h3>
+      <p class="muted">Ocena setupu, ryzyka, RR, błędów i jakości egzekucji.</p>
     </div>
     <div class="card">
-      <h3>Checklists</h3>
-      <p class="muted">Entry conditions, structure confirmation, and scenario planning.</p>
+      <h3>Checklisty</h3>
+      <p class="muted">Warunki wejścia, potwierdzenia struktury, scenariusze.</p>
     </div>
     <div class="card">
-      <h3>Limits & history</h3>
-      <p class="muted">Free: 3/month. Pro: unlimited. Usage panel and analysis history.</p>
+      <h3>Limity i historia</h3>
+      <p class="muted">Free: 3/miesiąc. Pro: nielimitowane. Panel zużycia.</p>
     </div>
   </div>
 
   <div class="cta-strip">
     <div>
-      <div class="cta-strip__title">Start in 2 minutes</div>
-      <div class="muted">Create an account and run your first analyses.</div>
+      <div class="cta-strip__title">Zacznij w 2 minuty</div>
+      <div class="muted">Załóż konto i przetestuj pierwsze analizy.</div>
     </div>
-    <a class="btn btn--primary" href="{{ url_for('signup') }}">Create account</a>
+    <a class="btn btn--primary" href="{{ url_for('signup') }}">Załóż konto</a>
   </div>
 </section>
 
 <section class="section">
   <div class="section__head">
-    <h2>Pricing</h2>
-    <p class="muted">Simple and clear.</p>
+    <h2>Cennik</h2>
+    <p class="muted">Prosty i czytelny.</p>
   </div>
 
   <div class="grid3">
     <div class="card card--price">
       <div class="price__name">Free</div>
-      <div class="price__value">0 PLN</div>
-      <div class="muted">3 analyses / month</div>
+      <div class="price__value">0 zł</div>
+      <div class="muted">3 analizy / miesiąc</div>
       <ul class="list">
-        <li>Dashboard + limits</li>
-        <li>Analysis history</li>
-        <li>Basic checklists</li>
+        <li>Dashboard + limity</li>
+        <li>Historia analiz (demo)</li>
+        <li>Podstawowe checklisty</li>
       </ul>
-      <a class="btn btn--ghost w100" href="{{ url_for('signup') }}">Get started</a>
+      <a class="btn btn--ghost w100" href="{{ url_for('signup') }}">Start</a>
     </div>
 
     <div class="card card--price card--highlight">
       <div class="price__name">Pro</div>
-      <div class="price__value">{{ PRO_PRICE_MONTHLY_PLN }} PLN <span class="muted">/ mo</span></div>
-      <div class="muted">Unlimited analyses</div>
+      <div class="price__value">{{ PRO_PRICE_MONTHLY_PLN }} zł <span class="muted">/ mies.</span></div>
+      <div class="muted">Nielimitowane analizy</div>
       <ul class="list">
-        <li>Unlimited trade reviews</li>
-        <li>Priority processing (soon)</li>
-        <li>Report export (soon)</li>
+        <li>Nielimitowane sprawdzone trade’y</li>
+        <li>Priorytet (wkrótce)</li>
+        <li>Eksport raportu (wkrótce)</li>
       </ul>
-      <a class="btn btn--primary w100" href="{{ url_for('pricing') }}">Choose</a>
+      <a class="btn btn--primary w100" href="{{ url_for('pricing') }}">Wybierz</a>
     </div>
 
     <div class="card card--price">
-      <div class="price__name">Pro (yearly)</div>
-      <div class="price__value">{{ PRO_PRICE_YEARLY_PLN }} PLN <span class="muted">/ year</span></div>
-      <div class="muted">-10% vs 12× monthly</div>
+      <div class="price__name">Pro (rocznie)</div>
+      <div class="price__value">{{ PRO_PRICE_YEARLY_PLN }} zł <span class="muted">/ rok</span></div>
+      <div class="muted">-10% vs. 12× miesięczny</div>
       <ul class="list">
-        <li>Unlimited analyses</li>
-        <li>Locked price for a year</li>
-        <li>Priority processing (soon)</li>
+        <li>Nielimitowane analizy</li>
+        <li>Stała cena na rok</li>
+        <li>Priorytet (wkrótce)</li>
       </ul>
-      <a class="btn btn--ghost w100" href="{{ url_for('pricing') }}">Choose</a>
+      <a class="btn btn--ghost w100" href="{{ url_for('pricing') }}">Wybierz</a>
     </div>
   </div>
 </section>
@@ -158,21 +158,21 @@
 <section id="faq" class="section">
   <div class="section__head">
     <h2>FAQ</h2>
-    <p class="muted">Common questions.</p>
+    <p class="muted">Najczęstsze pytania.</p>
   </div>
 
   <div class="faq">
     <details class="card">
-      <summary>Is this investment advice?</summary>
-      <p class="muted">No. This is an educational and analytical tool. You make your own decisions.</p>
+      <summary>Czy to jest porada inwestycyjna?</summary>
+      <p class="muted">Nie. To narzędzie edukacyjne i analityczne. Decyzje podejmujesz sam.</p>
     </details>
     <details class="card">
-      <summary>Does Pro activate immediately after payment?</summary>
-      <p class="muted">Yes—once your subscription is active, your plan updates automatically. If it doesn’t refresh right away, wait a moment and refresh the dashboard.</p>
+      <summary>Czy Pro działa od razu po opłaceniu?</summary>
+      <p class="muted">W tej wersji to demo — płatności dodamy na kolejnym etapie (Stripe).</p>
     </details>
     <details class="card">
-      <summary>How does chart analysis work (image → trade plan)?</summary>
-      <p class="muted">You upload a screenshot; the system returns a direction plus entry, take profit, stop loss, and a short rationale.</p>
+      <summary>Co z analizą wykresu (image → tekst)?</summary>
+      <p class="muted">Dodamy upload + analizę przez OpenAI w następnym kroku.</p>
     </details>
   </div>
 </section>

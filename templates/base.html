@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="pl">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -17,20 +17,20 @@
         <span class="brand__name">TraderAI</span>
       </a>
 
-      <nav class="nav" aria-label="Navigation">
-        <a class="nav__link" href="{{ url_for('index') }}#how-it-works">How it works</a>
-        <a class="nav__link" href="{{ url_for('index') }}#features">Features</a>
-        <a class="nav__link" href="{{ url_for('pricing') }}">Pricing</a>
+      <nav class="nav" aria-label="Nawigacja">
+        <a class="nav__link" href="{{ url_for('index') }}#jakdziala">Jak działa</a>
+        <a class="nav__link" href="{{ url_for('index') }}#funkcje">Funkcje</a>
+        <a class="nav__link" href="{{ url_for('pricing') }}">Cennik</a>
         <a class="nav__link" href="{{ url_for('index') }}#faq">FAQ</a>
       </nav>
 
       <div class="topbar__actions">
         {% if session.get('uid') %}
           <a class="btn btn--ghost" href="{{ url_for('dashboard') }}">Dashboard</a>
-          <a class="btn btn--ghost" href="{{ url_for('logout') }}">Log out</a>
+          <a class="btn btn--ghost" href="{{ url_for('logout') }}">Wyloguj</a>
         {% else %}
-          <a class="btn btn--ghost" href="{{ url_for('login') }}">Log in</a>
-          <a class="btn btn--primary" href="{{ url_for('signup') }}">Sign up</a>
+          <a class="btn btn--ghost" href="{{ url_for('login') }}">Zaloguj</a>
+          <a class="btn btn--primary" href="{{ url_for('signup') }}">Załóż konto</a>
         {% endif %}
       </div>
     </div>
@@ -53,7 +53,7 @@
   <footer class="footer">
     <div class="container footer__inner">
       <div class="muted">© {{ year }} TraderAI</div>
-      <div class="muted">Free {{ FREE_MONTHLY_LIMIT }}/mo • Pro unlimited</div>
+      <div class="muted">Free {{ FREE_MONTHLY_LIMIT }}/mies. • Pro nielimitowane</div>
     </div>
   </footer>
 

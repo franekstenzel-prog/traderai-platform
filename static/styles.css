@@ -198,6 +198,7 @@ a{color:inherit}
 }
 .toast--ok{border-color: rgba(35,196,131,.35)}
 .toast--error{border-color: rgba(239,68,68,.35)}
+.toast--warn{border-color: rgba(245,158,11,.35)}
 
 .auth{padding:34px 0}
 .auth__card{max-width:420px;margin:0 auto}
