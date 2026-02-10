@@ -1,250 +1,68 @@
-{% extends "base.html" %}
-{% block title %}TraderAI — Dashboard{% endblock %}
-{% block content %}
-<section class="dash">
-  <aside class="sidebar card">
-    <div class="sidebar__top">
-      <div class="sidebar__title">Dashboard</div>
-      <div class="muted">{{ user['email'] }}</div>
+{% extends "layout_app.html" %}
+{% set page_title = "Dashboard" %}
+{% set active = "dashboard" %}
+
+{% block app_top_actions %}
+  <a class="btn btn--primary" href="{{ url_for('analyze_page') }}">New analysis</a>
+{% endblock %}
+
+{% block app_content %}
+  <div class="grid3">
+    <div class="card">
+      <div class="muted">Plan</div>
+      <div class="big">{{ user_plan_label }}</div>
+      {% if user_stripe_status and user_plan_label != "Free" %}
+        <div class="muted small" style="margin-top:6px">Status: <span class="mono">{{ user_stripe_status }}</span></div>
+      {% endif %}
+      <div class="muted small" style="margin-top:10px">This product is educational and not investment advice.</div>
     </div>
-
-    <div class="kpi">
-      <div class="kpi__row">
-        <span class="muted">Plan</span>
-        <span class="mono">{{ user['plan'] }}</span>
-      </div>
-
-      {% if user['plan'] != 'free' %}
-      <div class="kpi__row">
-        <span class="muted">Status (Stripe)</span>
-        <span class="mono">{{ billing['status'] or user['stripe_status'] or '—' }}</span>
-      </div>
-
-      {% if billing and billing['current_period_end'] %}
-      <div class="kpi__row">
-        <span class="muted">Odnowienie</span>
-        <span class="mono">{{ billing['current_period_end'] }}</span>
-      </div>
-      {% endif %}
-
-      {% if billing %}
-      <div class="kpi__row">
-        <span class="muted">Anulowanie</span>
-        <span class="mono">{{ 'tak' if billing['cancel_at_period_end'] else 'nie' }}</span>
-      </div>
-      {% endif %}
-
-      {% if billing and billing['effective_plan'] != user['plan'] %}
-      <div class="kpi__row">
-        <span class="muted">Dostęp (fallback)</span>
-        <span class="mono">{{ billing['effective_plan'] }}</span>
-      </div>
-      {% endif %}
-      {% endif %}
-
-      <div class="kpi__row">
-        <span class="muted">Analizy (ten miesiąc)</span>
-        <span class="mono">{{ user['analyses_used'] }}</span>
-      </div>
-
+    <div class="card">
+      <div class="muted">Analyses this month</div>
+      <div class="big">{{ user['analyses_used'] }}</div>
       {% if remaining is not none %}
-      <div class="kpi__row">
-        <span class="muted">Pozostało</span>
-        <span class="mono">{{ remaining }}</span>
-      </div>
+        <div class="muted small" style="margin-top:6px">Remaining: <span class="mono">{{ remaining }}</span></div>
+      {% else %}
+        <div class="muted small" style="margin-top:6px">Unlimited</div>
       {% endif %}
-
-      <div class="kpi__hint muted">
-        Free: {{ FREE_MONTHLY_LIMIT }}/mies. • Pro: nielimitowane
-      </div>
     </div>
-
-    <div class="sidebar__actions">
-      <a class="btn btn--ghost" href="{{ url_for('pricing') }}">Cennik / Upgrade</a>
-
-      {% if stripe_enabled and user['stripe_customer_id'] %}
-        <form method="post" action="{{ url_for('billing_sync') }}">
-          <button class="btn btn--ghost" type="submit">Odśwież status płatności</button>
-        </form>
-
-        <a class="btn btn--ghost" href="{{ url_for('billing_portal') }}">Panel płatności</a>
-
-        {% if user['plan'] != 'free' and user['stripe_subscription_id'] %}
-          {% if billing and billing['cancel_at_period_end'] %}
-            <form method="post" action="{{ url_for('billing_resume') }}">
-              <button class="btn btn--primary" type="submit">Wznów subskrypcję</button>
-            </form>
-          {% else %}
-            <form method="post" action="{{ url_for('billing_cancel') }}">
-              <button class="btn btn--ghost" type="submit">Anuluj na koniec okresu</button>
-            </form>
-          {% endif %}
-        {% endif %}
-      {% endif %}
-
-      <a class="btn btn--ghost" href="{{ url_for('logout') }}">Wyloguj</a>
+    <div class="card">
+      <div class="muted">Performance (Journal)</div>
+      <div class="big">{{ perf.net_pnl|round(2) if perf else 0 }}{% if perf_currency %} {{ perf_currency }}{% endif %}</div>
+      <div class="muted small" style="margin-top:6px">Win rate: <span class="mono">{{ perf.win_rate|round(1) if perf else 0 }}%</span> • Trades: <span class="mono">{{ perf.trades if perf else 0 }}</span></div>
     </div>
+  </div>
 
-    {% if billing and billing['state'] == 'grace' %}
-      <div class="toast toast--warn" style="margin-top:12px">
-        Płatność nieudana (<span class="mono">past_due</span>). Dostęp Pro działa jeszcze do
-        <span class="mono">{{ billing['grace_until'] or '—' }}</span>.
-        Zaktualizuj kartę w <a href="{{ url_for('billing_portal') }}">Panelu płatności</a>.
-      </div>
-    {% elif billing and billing['state'] == 'issue' and user['plan'] != 'free' %}
-      <div class="toast toast--error" style="margin-top:12px">
-        Subskrypcja wymaga uwagi (status: <span class="mono">{{ billing['status'] or '—' }}</span>).
-        Przejdź do <a href="{{ url_for('billing_portal') }}">Panelu płatności</a> lub kliknij
-        <span class="mono">Odśwież status płatności</span>.
-      </div>
-    {% endif %}
-
-    <div class="card card--inset" style="margin-top:14px">
-      <div class="muted" style="margin-bottom:8px">Ostatnie analizy</div>
-      {% if recent and recent|length %}
+  <div class="grid2" style="margin-top:16px">
+    <div class="card">
+      <div class="card__title">Recent analyses</div>
+      {% if recent_analyses and recent_analyses|length %}
         <div class="list">
-          {% for r in recent %}
+          {% for r in recent_analyses %}
             <a class="list__row" href="{{ url_for('analysis_view', analysis_id=r['id']) }}">
-              <span class="mono">{{ r['pair'] }} • {{ r['timeframe'] }}</span>
+              <span class="mono">{{ r['pair'] }} • {{ r['timeframe'] }}{% if r['mode'] %} • {{ r['mode'] }}{% endif %}</span>
               <span class="muted">{{ r['created_at'][:10] }}</span>
             </a>
           {% endfor %}
         </div>
       {% else %}
-        <div class="muted">Brak historii.</div>
+        <div class="muted">No analyses yet.</div>
       {% endif %}
     </div>
-  </aside>
 
-  <div class="dash__main">
     <div class="card">
-      <div class="card__title">Analiza screena</div>
-      <div class="muted" style="margin-bottom:12px">
-        Wgraj screen wykresu. Dostaniesz: kierunek (long/short) + entry + take profit + stop loss.
-      </div>
-
-      {% if not openai_enabled %}
-        <div class="toast toast--error">
-          Brak konfiguracji OpenAI (OPENAI_API_KEY). Analizy są chwilowo niedostępne.
-        </div>
-      {% endif %}
-
-      <form class="form" action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data">
-        <div class="grid3">
-          <label class="field">
-            <span class="field__label">Para</span>
-            <input name="pair" value="{{ user['default_pair'] or 'BTCUSDT' }}" placeholder="np. BTCUSDT" required />
-          </label>
-
-          <label class="field">
-            <span class="field__label">Interwał</span>
-            <input name="timeframe" value="{{ user['default_timeframe'] or '1H' }}" placeholder="np. 15M / 1H / 4H" required />
-          </label>
-
-          <label class="field">
-            <span class="field__label">Kapitał</span>
-            <input name="capital" value="{{ user['default_capital'] or 1000 }}" inputmode="decimal" placeholder="np. 10000" required />
-          </label>
-        </div>
-
-        <div class="grid3" style="margin-top:10px">
-          <label class="field">
-            <span class="field__label">Ryzyko na trade</span>
-            <input name="risk_fraction" value="{{ user['default_risk_fraction'] or 0.02 }}" inputmode="decimal" placeholder="np. 0.02 = 2%" required />
-            <span class="field__hint muted">Podaj jako część kapitału (0.02 = 2%).</span>
-          </label>
-
-          <label class="field">
-            <span class="field__label">Screen (PNG/JPG/WEBP)</span>
-            <input name="chart" type="file" accept=".png,.jpg,.jpeg,.webp" required />
-          </label>
-
-          <div class="field">
-            <span class="field__label">Akcja</span>
-            <button class="btn btn--primary" type="submit" {% if not openai_enabled %}disabled{% endif %}>Analizuj</button>
-            <span class="field__hint muted">Limit Free: {{ FREE_MONTHLY_LIMIT }}/miesiąc. • Newsy pobierane automatycznie.</span>
-          </div>
-        </div>
-      </form>
-    </div>
-
-    {% if last %}
-      {% set result = last['result_json'] | loads %}
-      <div class="card" style="margin-top:16px">
-        <div class="card__title">Ostatnia analiza</div>
-
-        <div class="grid2">
-          <div class="card card--inset">
-            <div class="trade-head">
-              <div class="muted">{{ result.pair }} • {{ result.timeframe }}</div>
-              {% if result.signal == "LONG" %}
-                <div class="signal-banner signal-banner--long">long</div>
-              {% elif result.signal == "SHORT" %}
-                <div class="signal-banner signal-banner--short">short</div>
-              {% else %}
-                <div class="signal-banner signal-banner--no">no trade</div>
-              {% endif %}
+      <div class="card__title">Recent trades</div>
+      {% if recent_trades and recent_trades|length %}
+        <div class="list">
+          {% for t in recent_trades %}
+            <div class="list__row">
+              <span class="mono">{{ t['symbol'] }} • {{ t['side'] }}{% if t['mode'] %} • {{ t['mode'] }}{% endif %}</span>
+              <span class="muted">PnL: <span class="mono">{{ (t['pnl'] or 0)|round(2) }}</span></span>
             </div>
-
-            {% if result.signal != "NO_TRADE" %}
-              <div class="trade-grid">
-                <div class="trade-box trade-box--entry">
-                  <div class="trade-box__label">Entry</div>
-                  <div class="trade-box__value">{{ result.entry }}</div>
-                </div>
-                <div class="trade-box trade-box--tp">
-                  <div class="trade-box__label">Take profit</div>
-                  <div class="trade-box__value">
-                    {% if result.take_profit and result.take_profit|length %}
-                      <div class="chips">
-                        {% for tp in result.take_profit %}
-                          <span class="chip">{{ tp }}</span>
-                        {% endfor %}
-                      </div>
-                    {% else %}
-                      —
-                    {% endif %}
-                  </div>
-                </div>
-                <div class="trade-box trade-box--sl">
-                  <div class="trade-box__label">Stop loss</div>
-                  <div class="trade-box__value">{{ result.stop_loss }}</div>
-                </div>
-              </div>
-
-              {% if result.rationale is defined and result.rationale and result.rationale|length %}
-                <details class="trade-why">
-                  <summary>Uzasadnienie</summary>
-                  <ul>
-                    {% for line in result.rationale %}
-                      <li>{{ line }}</li>
-                    {% endfor %}
-                  </ul>
-                </details>
-              {% endif %}
-            {% else %}
-              <div class="muted" style="margin-top:10px">
-                {{ result.setup }}
-                {% if not result.is_chart %}
-                  <div class="muted" style="margin-top:6px">
-                    Nie widzę wykresu na screenie. Jeśli wgrywasz cały ekran, przytnij/zbliż do samego wykresu (świece + oś ceny i czasu).
-                  </div>
-                {% endif %}
-              </div>
-            {% endif %}
-          </div>
-
-          <div class="card card--inset">
-            <div class="muted" style="margin-top:14px">Podgląd screena</div>
-            <img class="img-preview" src="data:{{ last['image_mime'] }};base64,{{ last['image_b64'] }}" alt="Wgrany screen" />
-          </div>
+          {% endfor %}
         </div>
-
-        <div class="muted" style="margin-top:10px">
-          Uwaga: To narzędzie ma charakter edukacyjny i nie stanowi porady inwestycyjnej.
-        </div>
-      </div>
-    {% endif %}
+      {% else %}
+        <div class="muted">No trades logged yet. Use the Journal tab.</div>
+      {% endif %}
+    </div>
   </div>
-</section>
 {% endblock %}

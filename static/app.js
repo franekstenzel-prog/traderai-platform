@@ -21,3 +21,27 @@
 
   render();
 })();
+
+// App shell: mobile sidebar toggle
+(function(){
+  const btn = document.querySelector('[data-sidebar-toggle]');
+  const shell = document.querySelector('[data-app-shell]');
+  const overlay = document.querySelector('[data-sidebar-overlay]');
+  if(!btn || !shell) return;
+
+  function setOpen(isOpen){
+    shell.classList.toggle('is-nav-open', !!isOpen);
+    if(overlay) overlay.classList.toggle('is-active', !!isOpen);
+    document.body.classList.toggle('no-scroll', !!isOpen);
+  }
+
+  btn.addEventListener('click', () => {
+    setOpen(!shell.classList.contains('is-nav-open'));
+  });
+  overlay && overlay.addEventListener('click', () => setOpen(false));
+
+  // Close on Esc
+  document.addEventListener('keydown', (e) => {
+    if(e.key === 'Escape') setOpen(false);
+  });
+})();

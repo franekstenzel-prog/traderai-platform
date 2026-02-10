@@ -6,7 +6,6 @@ import os
 import re
 import sqlite3
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 from functools import wraps
 from pathlib import Path
 from typing import Optional
@@ -17,11 +16,13 @@ from urllib.request import Request, urlopen
 import stripe
 from flask import (
     Flask,
+    Response,
     flash,
     g,
     redirect,
     render_template,
     request,
+    session,
     url_for,
 )
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -30,9 +31,12 @@ from werkzeug.utils import secure_filename
 # -----------------------------
 # Config
 # -----------------------------
+APP_VERSION = "v2.6-pro"
+
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = os.environ.get("DB_PATH") or str(BASE_DIR / "app.db")
-# Ensure DB directory exists (Render disk, Docker volume, etc.)
+
+# Render (and similar) persistent disk support: DB_PATH can be an absolute path.
+DB_PATH = os.environ.get("DB_PATH", str(BASE_DIR / "app.db"))
 try:
     _db_dir = os.path.dirname(DB_PATH)
     if _db_dir:
@@ -104,14 +108,31 @@ def _ensure_columns(db: sqlite3.Connection) -> None:
         "default_timeframe": "TEXT",
         "default_capital": "REAL",
         "default_risk_fraction": "REAL",
+        "default_mode": "TEXT",
     }
     for col, coltype in needed.items():
         if not _column_exists(db, "users", col):
             db.execute(f"ALTER TABLE users ADD COLUMN {col} {coltype}")
 
 
+def _ensure_table_columns(db: sqlite3.Connection, table: str, needed: dict[str, str]) -> None:
+    """Add missing columns to a table (best-effort, SQLite-safe)."""
+    try:
+        rows = db.execute(f"PRAGMA table_info({table})").fetchall()
+        existing = {r["name"] for r in rows}
+    except Exception:
+        return
+    for col, coltype in needed.items():
+        if col not in existing:
+            try:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
+            except Exception:
+                pass
+
 def init_db() -> None:
     db = get_db()
+
+    # Users (with backward-compatible columns)
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -126,6 +147,8 @@ def init_db() -> None:
         """
     )
     _ensure_columns(db)
+
+    # Analyses
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS analyses (
@@ -136,6 +159,7 @@ def init_db() -> None:
             timeframe TEXT,
             capital REAL,
             risk_fraction REAL,
+            mode TEXT,
             result_json TEXT NOT NULL,
             image_mime TEXT,
             image_b64 TEXT,
@@ -143,6 +167,96 @@ def init_db() -> None:
         )
         """
     )
+
+    # Trading journal
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            mode TEXT,
+            side TEXT NOT NULL, -- LONG | SHORT
+            entry REAL,
+            stop_loss REAL,
+            exit_price REAL,
+            capital REAL,
+            risk_fraction REAL,
+            r_multiple REAL,
+            pnl REAL,
+            notes TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+
+    # Lessons progress tracking
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS lesson_progress (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            lesson_id TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            UNIQUE(user_id, lesson_id),
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+
+    # Backward-compatible migrations for evolving tables
+    _ensure_table_columns(
+        db,
+        "analyses",
+        {
+            "pair": "TEXT",
+            "timeframe": "TEXT",
+            "capital": "REAL",
+            "risk_fraction": "REAL",
+            "mode": "TEXT",
+            "image_mime": "TEXT",
+            "image_b64": "TEXT",
+        },
+    )
+    _ensure_table_columns(
+        db,
+        "trades",
+        {
+            "mode": "TEXT",
+            "entry": "REAL",
+            "stop_loss": "REAL",
+            "exit_price": "REAL",
+            "capital": "REAL",
+            "risk_fraction": "REAL",
+            "r_multiple": "REAL",
+            "pnl": "REAL",
+            "notes": "TEXT",
+        },
+    )
+    _ensure_table_columns(db, "lesson_progress", {"completed_at": "TEXT"})
+
+    # Helpful indexes (best-effort)
+    try:
+        db.execute("CREATE INDEX IF NOT EXISTS idx_trades_user_created ON trades(user_id, created_at)")
+    except Exception:
+        pass
+    try:
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_lesson_progress_user_lesson ON lesson_progress(user_id, lesson_id)"
+        )
+    except Exception:
+        pass
+
+    # Fill missing completed_at for legacy rows (if any)
+    try:
+        db.execute(
+            "UPDATE lesson_progress SET completed_at = ? WHERE completed_at IS NULL OR completed_at = ''",
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+    except Exception:
+        pass
+
     db.commit()
 
 
@@ -150,89 +264,6 @@ def month_key(dt: Optional[datetime] = None) -> str:
     dt = dt or datetime.now(timezone.utc)
     return f"{dt.year:04d}-{dt.month:02d}"
 
-
-# -----------------------------
-# Billing helpers
-# -----------------------------
-APP_TZ = ZoneInfo(os.environ.get("APP_TZ") or "Europe/Warsaw")
-
-
-def _now_ts() -> int:
-    return int(datetime.now(timezone.utc).timestamp())
-
-
-def _fmt_ts(ts: Optional[int]) -> Optional[str]:
-    """Format a unix timestamp to a user-friendly string in APP_TZ."""
-    if not ts:
-        return None
-    try:
-        return datetime.fromtimestamp(int(ts), tz=timezone.utc).astimezone(APP_TZ).strftime("%Y-%m-%d %H:%M")
-    except Exception:
-        return None
-
-
-def effective_plan_for_limits(user_row) -> str:
-    """
-    Compute plan used for gating/limits based on Stripe state.
-
-    - active/trialing: keep Pro
-    - past_due: allow Pro during grace period; otherwise behave like Free
-    - anything else: behave like Free
-    """
-    plan = (user_row["plan"] or "free")
-    status = (user_row["stripe_status"] or "").lower()
-
-    if plan == "free":
-        return "free"
-
-    if status in ("active", "trialing"):
-        return plan
-
-    if status == "past_due":
-        grace_until = user_row["stripe_grace_until"]
-        if grace_until and _now_ts() <= int(grace_until):
-            return plan
-        return "free"
-
-    # canceled/unpaid/incomplete/paused/pending/unknown
-    return "free"
-
-
-def billing_ui(user_row) -> dict:
-    """
-    Compact billing summary for templates (safe when Stripe is not configured).
-    """
-    status = (user_row["stripe_status"] or "").lower()
-    plan = user_row["plan"] or "free"
-
-    cancel_at_period_end = bool(int(user_row["stripe_cancel_at_period_end"] or 0))
-    current_period_end = user_row["stripe_current_period_end"]
-    grace_until = user_row["stripe_grace_until"]
-
-    ui = {
-        "plan": plan,
-        "status": status,
-        "effective_plan": effective_plan_for_limits(user_row),
-        "cancel_at_period_end": cancel_at_period_end,
-        "current_period_end_ts": current_period_end,
-        "current_period_end": _fmt_ts(current_period_end),
-        "grace_until_ts": grace_until,
-        "grace_until": _fmt_ts(grace_until),
-    }
-
-    # Derive a simple state badge for UI
-    if plan == "free" or not status:
-        ui["state"] = "free"
-    elif status in ("active", "trialing"):
-        ui["state"] = "ok"
-    elif status == "past_due":
-        ui["state"] = "grace" if ui["effective_plan"] != "free" else "issue"
-    elif status == "pending":
-        ui["state"] = "pending"
-    else:
-        ui["state"] = "issue"
-
-    return ui
 
 # -----------------------------
 # Auth
@@ -273,11 +304,99 @@ def monthly_limit_for_plan(plan: str):
 
 
 def can_analyze(user_row) -> bool:
-    plan_for_limits = effective_plan_for_limits(user_row)
-    limit = monthly_limit_for_plan(plan_for_limits)
+    plan = effective_plan(user_row)
+    limit = monthly_limit_for_plan(plan)
     if limit is None:
         return True
     return int(user_row["analyses_used"] or 0) < int(limit)
+
+
+def _now_ts() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
+
+
+def effective_plan(user_row) -> str:
+    """Return the effective plan based on stored plan + Stripe status/grace."""
+    plan = (user_row["plan"] or "free")
+    status = (user_row.get("stripe_status") or "").lower().strip()
+    # Active / trialing always means Pro.
+    if status in ("active", "trialing"):
+        return plan if plan in ("pro_monthly", "pro_yearly") else "pro_monthly"
+
+    # Grace period: until current period end (stored as unix timestamp) or explicit grace.
+    grace = int(user_row.get("stripe_grace_until") or 0)
+    period_end = int(user_row.get("stripe_current_period_end") or 0)
+    until = max(grace, period_end)
+    if until and until > _now_ts():
+        return plan if plan in ("pro_monthly", "pro_yearly") else "pro_monthly"
+    return "free"
+
+
+def plan_label(plan: str) -> str:
+    if plan == "pro_yearly":
+        return "Pro (Yearly)"
+    if plan == "pro_monthly":
+        return "Pro (Monthly)"
+    return "Free"
+
+
+def compute_performance(db: sqlite3.Connection, user_id: int) -> dict:
+    """Compute lightweight performance stats from the trades journal.
+
+    Uses only CLOSED trades (pnl IS NOT NULL) to avoid skew from open entries.
+    PnL is risk-normalized: pnl = R-multiple × (capital × risk%).
+    """
+    rows = db.execute(
+        "SELECT r_multiple, pnl FROM trades WHERE user_id = ? AND pnl IS NOT NULL ORDER BY id ASC",
+        (user_id,),
+    ).fetchall()
+
+    total = len(rows)
+    wins = losses = be = 0
+    pnl_sum = 0.0
+    r_list: list[float] = []
+    pos_pnl = 0.0
+    neg_pnl = 0.0
+
+    for r in rows:
+        pnl = r["pnl"]
+        rm = r["r_multiple"]
+
+        if pnl is not None:
+            pnl_f = float(pnl)
+            pnl_sum += pnl_f
+            if pnl_f > 0:
+                wins += 1
+                pos_pnl += pnl_f
+            elif pnl_f < 0:
+                losses += 1
+                neg_pnl += pnl_f
+            else:
+                be += 1
+
+        if rm is not None:
+            try:
+                r_list.append(float(rm))
+            except Exception:
+                pass
+
+    win_rate = (wins / total * 100.0) if total else 0.0
+    avg_r = (sum(r_list) / len(r_list)) if r_list else 0.0
+    expectancy_r = avg_r
+
+    profit_factor = (pos_pnl / abs(neg_pnl)) if neg_pnl else (pos_pnl if pos_pnl else 0.0)
+
+    return {
+        "trades": total,
+        "wins": wins,
+        "losses": losses,
+        "be": be,
+        "win_rate": win_rate,
+        "net_pnl": pnl_sum,
+        "avg_r": avg_r,
+        "expectancy_r": expectancy_r,
+        "profit_factor": profit_factor,
+    }
 
 
 # -----------------------------
@@ -414,77 +533,70 @@ def auto_news_context(pair: str, timeframe: str = "") -> str:
     return text
 
 
-def analyze_with_openai(
+# -----------------------------
+# OpenAI: chart analysis (v2.6 PRO, English output)
+# -----------------------------
+def analyze_with_openai_pro(
     image_bytes: bytes,
     image_mime: str,
     pair: str,
     timeframe: str,
     capital: float,
     risk_fraction: float,
+    mode: str,
     news_context: str = "",
 ) -> dict:
+    """English, concise instruction set with permissive NO_TRADE."""
+
     if not OPENAI_API_KEY:
-        raise RuntimeError("Brak OPENAI_API_KEY w zmiennych środowiskowych.")
+        raise RuntimeError("Missing OPENAI_API_KEY environment variable.")
 
     from openai import OpenAI  # lazy import
 
     client = OpenAI(api_key=OPENAI_API_KEY)
-
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
     image_url = f"data:{image_mime};base64,{base64_image}"
-    # JSON schema for a reliable response (Structured Outputs).
+
+    mode_norm = (mode or "").strip().lower()
+    if mode_norm not in ("scalp", "swing"):
+        mode_norm = "swing"
+
     schema = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
             "pair": {"type": "string"},
             "timeframe": {"type": "string"},
-
-            "is_chart": {"type": "boolean", "description": "Czy obraz zawiera screen wykresu cenowego (np. świece/line chart). Nawet jeśli wykres jest tylko częścią ekranu, ustaw true."},
-            "signal": {"type": "string", "enum": ["LONG", "SHORT", "NO_TRADE"], "description": "Jasny sygnał: LONG/SHORT lub NO_TRADE, jeśli brak czytelnego setupu"},
-            "confidence": {"type": "integer", "minimum": 0, "maximum": 100, "description": "Pewność sygnału w skali 0-100"},
-
-            "setup": {"type": "string", "description": "Nazwa setupu i warunki jego ważności (albo powód NO_TRADE)"},
-            "entry": {"type": ["string", "null"], "description": "Konkretny entry (liczba lub zakres) albo null przy NO_TRADE"},
-            "stop_loss": {"type": ["string", "null"], "description": "Konkretny stop-loss (liczba lub zakres) albo null przy NO_TRADE"},
-            "take_profit": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "TP1/TP2/TP3 (liczby lub zakresy); może być puste przy NO_TRADE",
-            },
-
-            "position_size": {
-                "type": ["string", "null"],
-                "description": "Rozmiar pozycji / ekspozycja bazując na kapitale i ryzyku; null przy NO_TRADE",
-            },
-
-            "risk": {"type": "string", "description": "Ryzyko, co może pójść nie tak; co psuje setup"},
-            "invalidation": {"type": "string", "description": "Jasny warunek unieważnienia setupu (np. 'powrót poniżej X')"},
-            "issues": {"type": "array", "items": {"type": "string"}, "description": "Lista problemów/uwag dot. jakości screena (brak osi ceny, nieczytelny interwał, itp.)"},
-
-            "rationale": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Krótkie uzasadnienie decyzji (konkretnie co na wykresie przemawia za LONG/SHORT albo dlaczego NO_TRADE).",
-            },
-
+            "mode": {"type": "string", "enum": ["SCALP", "SWING"]},
+            "is_chart": {"type": "boolean"},
+            "signal": {"type": "string", "enum": ["LONG", "SHORT", "NO_TRADE"]},
+            "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
+            "setup": {"type": "string"},
+            "entry": {"type": ["string", "null"]},
+            "stop_loss": {"type": ["string", "null"]},
+            "take_profit": {"type": "array", "items": {"type": "string"}},
+            "position_size": {"type": ["string", "null"]},
+            "risk": {"type": "string"},
+            "invalidation": {"type": "string"},
+            "issues": {"type": "array", "items": {"type": "string"}},
+            "rationale": {"type": "array", "items": {"type": "string"}},
             "news": {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "mode": {"type": "string", "enum": ["not_provided", "user_provided"]},
+                    "mode": {"type": "string", "enum": ["not_provided", "auto"]},
                     "impact": {"type": "string", "enum": ["BULLISH", "BEARISH", "MIXED", "UNKNOWN"]},
                     "summary": {"type": "string"},
                     "key_points": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["mode", "impact", "summary", "key_points"],
             },
-
-            "explanation": {"type": "string", "description": "Krótkie, profesjonalne wyjaśnienie (bez obietnic zysków)"},
+            "explanation": {"type": "string"},
         },
         "required": [
             "pair",
             "timeframe",
+            "mode",
             "is_chart",
             "signal",
             "confidence",
@@ -501,233 +613,57 @@ def analyze_with_openai(
             "explanation",
         ],
     }
+
     instruction = f"""
-Jesteś profesjonalnym analitykiem tradingowym.
-Twoim zadaniem jest NAJPIERW ocenić, czy obraz przedstawia realny wykres cenowy (screen wykresu), a dopiero potem przygotować plan transakcyjny.
+You are a professional trading analyst.
 
-Parametry:
-- para: {pair}
-- interwał: {timeframe}
-- kapitał: {capital}
-- ryzyko na trade: {risk_fraction} (część kapitału, np. 0.02 = 2%)
-- kontekst/news (AUTO, bez pytania użytkownika; może być puste): {news_context or "BRAK"}
+Task:
+1) First decide whether the image contains a readable price chart screenshot. Set is_chart=false if it is NOT a chart, or if prices/timeframe are not readable.
+2) If is_chart=true, return one of: LONG, SHORT, or NO_TRADE.
+   - Use NO_TRADE if there is no clear edge, if structure is messy, or if risk is not definable.
+   - Never invent indicators or numbers not visible on the screenshot.
 
+Context:
+- Pair: {pair}
+- Timeframe: {timeframe}
+- Mode: {mode_norm.upper()} (SCALP = tighter SL/TP, quicker invalidation; SWING = wider structure-based levels)
+- Capital: {capital}
+- Risk per trade: {risk_fraction} (fraction of capital, e.g. 0.02 = 2%)
 
-Analiza techniczna — PEŁNA CHECKLISTA (rozważ TYLKO to, co widać na screenie; nie zgaduj niewidocznych danych):
+News (best-effort, may be empty):
+{news_context or ""}
 
-- Kontekst i warunki wykresu
-- Interwał (M1/M5/M15/H1/H4/D1/W1) i jego „sens” dla danego instrumentu
-- Multi-timeframe: trend/struktura z HTF + wejście na LTF
-- Rodzaj wykresu (świece/Heikin Ashi/Renko/Line) i ryzyko zniekształceń
-- Skala (logarytmiczna vs liniowa) – wpływ na S/R i trendline
-- Jakość screena: czytelność osi ceny/czasu, widoczność świec, zoom
-- Sesja (Azja/Londyn/NY), rollover, „dead hours”
-- Zmienność bieżąca vs średnia (czy rynek jest „rozkręcony”)
-- Trend rynku szerokiego (risk-on/off), wpływ indeksów, VIX (jeśli dotyczy)
-
-- Struktura rynku (market structure / price action)
-- Sekwencja HH/HL/LH/LL na danym TF
-- BOS (Break of Structure) – gdzie, jakim impulsem, czy po konsolidacji
-- CHoCH (Change of Character) – pierwszy sygnał zmiany kierunku
-- Pullback / retracement: czy jest „zdrowy” czy agresywny
-- Impuls vs korekta: czy ruch ma cechy impulsu (szybkość, zasięg, świece)
-- Range / konsolidacja: górna/dolna granica, środek range (mid)
-- Trendline i kanały: dotknięcia, fałszywe wybicia, nachylenie
-- Swing points: jak rynek reaguje na poprzednie swing high/low
-- Mikrostuktura na LTF: małe BOS/CHoCH zgodne lub przeciw HTF
-
-- Support / Resistance i strefy
-- Poziomy horyzontalne z HTF (najważniejsze)
-- Strefy podaży/popytu (supply/demand) – skąd wyszedł impuls
-- Flip level (S↔R) – potwierdzenia po przełamaniu
-- Reakcje na poziomie: odrzucenie vs przebicie vs re-test
-- Liczba testów poziomu (im więcej, tym słabszy / albo „bardziej oczywisty”)
-- „Clean” poziom vs „brudny” (wiele knotów i chaos)
-- Confluence: poziom + trendline + fib + VWAP + MA itp.
-- Poziomy psychologiczne (00/50/100), round numbers
-- Poziomy otwarcia dnia/tygodnia/miesiąca
-- Pivots (klasyczne, Camarilla) – jeśli używasz
-
-- Liquidity (płynność), polowania i pułapki
-- Equal highs / equal lows (magnes na płynność)
-- Sweep (zamiatanie) nad/pod poziomem i szybki powrót
-- Stop run / liquidity grab: objawy (knot, szybki rejection)
-- Breakout, który nie utrzymał się (bull/bear trap)
-- Wick into level + zamknięcie świecy po drugiej stronie (potwierdzenie pułapki)
-- Strefy obvious liquidity: nad konsolidacją, nad swing high, pod swing low
-- Gdzie powinien być SL: poza liquidity pool, nie „pod lokalnym dołkiem”
-- Thin liquidity (puste przestrzenie) – ryzyko szybkich przeskoków
-- Fair Value Gap / imbalance (jeśli używasz SMC/ICT)
-- Mitigation / fill imbalance – czy rynek wraca „domknąć” nieefektywność
-
-- Order blocks / SMC (jeśli widoczne)
-- Order block: ostatnia świeca przeciwna przed impulsem
-- Czy OB jest fresh (nietestowany) czy już mitigowany
-- Mitigation move: czy cena wróciła „zebrać” zlecenia i dopiero ruszyć
-- Breaker block: OB, który po wybiciu staje się strefą oporu/wsparcia
-- Premium/discount względem range (czy longujesz w premium – ryzyko)
-- Dealing range: skąd do dokąd, gdzie jest equilibrium
-- Internal vs external liquidity (wewnątrz struktury vs swingowe)
-
-- Świece i price action (candlestick analysis)
-- Rodzaj świecy: impulsowa / niezdecydowania / odrzuceniowa
-- Długość korpusu vs knoty (stosunek, dominacja strony)
-- Górny/dolny knot: rejection, absorpcja, „sprężyna”
-- Zamknięcie świecy (close) względem poziomu: nad/pod/na poziomie
-- Sekwencje świec: 2–3 świece potwierdzające (continuation / reversal)
-- Pin bar / hammer / shooting star (z kontekstem poziomu)
-- Engulfing (objęcie) – czy wybija strukturę czy tylko „szum”
-- Inside bar / mother bar – kompresja, potencjał wybicia
-- Doji – miejsce i znaczenie (na oporze vs w środku range)
-- Gap (FX/indeksy): zamknięcie luki, reakcja
-- Strong close vs weak close (zamknięcie przy high/low świecy)
-
-- Formacje klasyczne (patterns)
-- Double top / double bottom + sweep liquidity
-- Head & Shoulders / inverted H&S (i gdzie jest neckline)
-- Trójkąty: symetryczny / rosnący / malejący
-- Flagi i chorągiewki (kontynuacja trendu)
-- Wedge (klin): rising/falling – często wybicia przeciw trendline
-- Rounding top/bottom (rzadziej, ale bywa)
-- Cup & handle (jeśli czytelne)
-
-- Wolumen i pochodne wolumenu (tylko jeśli widoczne)
-- Wolumen: rośnie na impulsie / maleje na korekcie (zdrowy trend)
-- Wolumen na wybiciu poziomu: potwierdzenie vs „puste wybicie”
-- Wolumen na świecy odrzuceniowej (absorpcja)
-- Volume spike na końcu ruchu (climax volume) – możliwy zwrot
-- OBV, Volume Profile (jeśli używasz i jest na screenie)
-- POC, VAH, VAL (profil wolumenu) – magnetyzm ceny
-- Delta/footprint/CVD (jeśli masz i widać)
-- Absorpcja vs agresja (kupujący uderzają, ale cena nie idzie)
-
-- Zmienność i ryzyko (volatility / range)
-- ATR (średni zasięg) – czy SL/TP są realistyczne
-- Rozszerzenia zmienności po newsach – ryzyko spike & fade
-- Szerokość Bollinger Bands (kompresja → ekspansja) – jeśli widać
-- Chop market: whipsaw, brak follow-through
-- Średni zasięg impulsu vs korekty (czy edge jeszcze działa)
-
-- Wskaźniki (tylko jeśli widoczne; wtórnie)
-- MA/EMA: kierunek, nachylenie, położenie ceny względem MA
-- Krzyżowania MA jako filtr
-- RSI: trend RSI, dywergencje, overbought/oversold w trendzie
-- MACD: momentum, dywergencje, linia sygnałowa
-- Stochastic: timing w range, dywergencje
-- VWAP (session/anchored): mean reversion, wsparcie/opór
-- Ichimoku: filtr (jeśli ktoś używa)
-- ADX: siła trendu vs range
-- Supertrend / Parabolic SAR: trailing (jeśli widać)
-
-- Dywergencje i momentum
-- Dywergencja klasyczna i ukryta (kontynuacja)
-- Momentum świec (czy impuls słabnie: mniejsze korpusy, więcej knotów)
-- Brak follow-through po wybiciu (sygnał słabości)
-
-- Fibo (jeśli używasz i ma sens)
-- 0.382/0.5/0.618 retracement w trendzie
-- 0.786 jako głęboki pullback
-- Extensions 1.272/1.618 jako TP (z kontekstem)
-- Confluence fibo z poziomem HTF / OB / VWAP
-
-- Ważne ceny z czasu (time-based)
-- High/Low dnia poprzedniego (PDH/PDL)
-- High/Low tygodnia/miesiąca
-- Open dnia/tygodnia/miesiąca
-- London high/low, NY open (jeśli dotyczy)
-- Sweep PDH/PDL i powrót – częsty setup
-
-- Korelacje i kontekst międzyrynkowy (jako filtr)
-- Korelacja z rynkiem bazowym (alty vs BTC, indeksy vs indeksy)
-- DXY/obligacje/VIX – filtr trend/chop (bez zmyślania danych)
-- Dominacja BTC (w krypto) – filtr risk-on/off
-- Relatywna siła (instrument robi nowe high gdy rynek stoi)
-
-- Instrument-specyficzne
-- Spread, płynność, godziny handlu (CFD vs futures vs spot)
-- Luki/rollover (FX/indeksy), weekendy (krypto)
-- Tick size / minimalny SL / zasady brokera (praktyka)
-
-- Egzekucja: wejście/wyjście i scenariusze
-- Typ wejścia: market vs limit
-- Trigger: BOS/CHoCH, retest, świeca potwierdzająca
-- Invalidation: co musi się stać, żeby setup był nieaktualny
-- SL poza liquidity pool / poza invalidacją
-- TP na logicznych poziomach (swing, S/R, liquidity, fib)
-- RR i realizm (czy zasięg jest do zrobienia)
-- Scaling out / BE / trailing po strukturze (jeśli sensowne)
-
-- Anty-sygnały (co psuje trade)
-- Long pod HTF oporem bez wybicia i retestu
-- Short nad HTF wsparciem bez przełamania
-- Wejście w środku range (bez przewagi)
-- SL w obvious liquidity
-- TP bez celu (w powietrzu)
-- Brak potwierdzenia strukturalnego
-- Sprzeczność TF bez sygnału zmiany
-
-Zasady decyzyjne (WAŻNE — bez wyjątku):
-1) NO_TRADE wolno zwrócić TYLKO gdy:
-   - is_chart=false (brak wykresu na screenie), LUB
-   - wykres jest tak nieczytelny, że nie da się podać liczb entry/SL/TP (np. brak/nieczytelna oś ceny).
-2) Jeśli is_chart=true i da się odczytać ceny → ZAWSZE wybierz LONG albo SHORT (nigdy NO_TRADE).
-   - Jeśli nie ma „idealnego” setupu, wybierz kierunek zgodny z dominującą strukturą (HTF→LTF) i ustaw wejście SPRYTNIE:
-     preferuj LIMIT (pullback/retest do wsparcia/oporu, OB, strefy popytu/podaży) zamiast market.
-   - Confidence może być niska (np. 35–60), ale plan musi być logiczny.
-3) Dla LONG/SHORT zawsze podaj: entry, stop_loss, take_profit (TP1/TP2/TP3) oraz invalidation (jasny warunek unieważnienia).
-4) Nie zgaduj niewidocznych wskaźników/wolumenu/newsów. Jeśli czegoś nie widać, pomiń to w uzasadnieniu.
-
-Uzasadnienie (WYMAGANE):
-- Dla LONG/SHORT wypisz 8–14 krótkich punktów (myślniki), konkret z wykresu.
-  Minimum musi się pojawić:
-  - 2 punkty o strukturze (BOS/CHoCH / HH-HL / LH-LL / range),
-  - 2 punkty o S/R lub strefach,
-  - 2 punkty o liquidity i/lub świecach (sweep/rejection/knoty/pułapki),
-  - 1 punkt [PLAN]: czy entry to market czy LIMIT i dlaczego właśnie tam,
-  - 1 punkt [ANTY]: co jest największym ryzykiem / co neguje trade.
-- Jeśli wykres jest nieczytelny i nie da się podać liczb → wtedy (i tylko wtedy) NO_TRADE + 1–3 powody w rationale i issues.
-
-Zarządzanie ryzykiem:
-- Ryzyko nominalne = kapitał * ryzyko_na_trade. Jeśli nie da się policzyć precyzyjnej wielkości pozycji (bo brak odległości do SL), podaj formułę i przykład (np. 'Ryzyko = 20 USDT; wielkość pozycji = 20 / (Entry-SL)').
-
-Newsy:
-- Jeżeli kontekst/news jest pusty, ustaw news.mode="not_provided" i impact="UNKNOWN". Nie pytaj użytkownika o newsy.
-- Jeżeli kontekst/news jest podany (w tym AUTO_NEWS), ustaw news.mode="user_provided" i oceń wpływ (impact) bez zmyślania faktów.
-
-Format:
-- Zwróć WYŁĄCZNIE obiekt JSON zgodny ze schematem (bez Markdown, bez dodatkowego tekstu).
-- Nie składaj obietnic zysków ani pewników. Maksymalnie rzeczowo.
+Output rules:
+- Return ONLY JSON matching the schema (no markdown).
+- If signal=NO_TRADE, set entry=null, stop_loss=null, position_size=null, take_profit=[] and explain clearly why.
+- If LONG/SHORT, provide concrete entry/SL/TP levels (numbers or tight ranges) and a clear invalidation.
+- Provide 6–12 short bullet points in rationale (structure, levels, liquidity/price action, and the biggest risk).
 """
-    def _call_openai(instruction_text: str) -> dict:
-        resp = client.responses.create(
-            model=OPENAI_MODEL,
-            input=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": instruction_text.strip()},
-                        {"type": "input_image", "image_url": image_url},
-                    ],
-                }
-            ],
-            text={
-                "format": {
-                    "type": "json_schema",
-                    # The API requires `text.format.name` for json_schema.
-                    "name": "trade_plan",
-                    "schema": schema,
-                    "strict": True,
-                }
-            },
-        )
-        out = (resp.output_text or "").strip()
-        return json.loads(out)
 
-    result = _call_openai(instruction)
+    resp = client.responses.create(
+        model=OPENAI_MODEL,
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": instruction.strip()},
+                    {"type": "input_image", "image_url": image_url},
+                ],
+            }
+        ],
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "trade_plan",
+                "schema": schema,
+                "strict": True,
+            }
+        },
+    )
+    out = (resp.output_text or "").strip()
+    result = json.loads(out)
 
-    # -----------------
-    # Post-validate guardrails (keep output strict, avoid nonsense trades)
-    # -----------------
+    # Post-validation (keep it safe + consistent)
     def _first_number(val: object) -> Optional[float]:
         if val is None:
             return None
@@ -740,7 +676,7 @@ Format:
         except Exception:
             return None
 
-    def _force_no_trade(reason: str, max_conf: int = 50):
+    def _force_no_trade(reason: str, max_conf: int = 55):
         result["signal"] = "NO_TRADE"
         result["setup"] = reason
         result["confidence"] = min(int(result.get("confidence") or 0), max_conf)
@@ -749,115 +685,61 @@ Format:
         result["position_size"] = None
         result["take_profit"] = []
 
-    # If it's not a chart, it must be NO_TRADE.
     if not bool(result.get("is_chart")):
-        _force_no_trade("NO_TRADE: brak czytelnego wykresu na screenie.", max_conf=20)
-        # keep rationale (if any) but ensure it's a list
-        if not isinstance(result.get("rationale"), list):
-            result["rationale"] = [str(result.get("rationale") or "")][:3]
+        _force_no_trade("NO_TRADE: not a readable price chart screenshot.", max_conf=25)
         return result
 
     sig = str(result.get("signal") or "NO_TRADE").upper()
     if sig not in ("LONG", "SHORT", "NO_TRADE"):
-        _force_no_trade("NO_TRADE: nieprawidłowy sygnał.")
-        sig = "NO_TRADE"
+        _force_no_trade("NO_TRADE: invalid signal.")
+        return result
     result["signal"] = sig
 
-    def _issues_blob(res: dict) -> str:
-        parts = []
-        try:
-            parts.append(str(res.get("setup") or ""))
-        except Exception:
-            pass
-        iss = res.get("issues") or []
-        if isinstance(iss, list):
-            parts.extend([str(x) for x in iss if str(x).strip()])
-        else:
-            parts.append(str(iss))
-        return " ".join(parts).lower()
+    # Normalize mode field
+    result["mode"] = "SCALP" if mode_norm == "scalp" else "SWING"
 
-    def _unreadable_or_missing_prices(res: dict) -> bool:
-        blob = _issues_blob(res)
-        # If the model says it's unreadable / missing axes, accept NO_TRADE.
-        keywords = [
-            "nieczytel", "zbyt mał", "brak osi", "brak świec", "brak wykres",
-            "nie widać osi", "nie widać ceny", "brak ceny", "brak czasu", "rozmyt",
-        ]
-        return any(k in blob for k in keywords)
-
-    # If it's a chart, we prefer ALWAYS LONG/SHORT (NO_TRADE only for unreadable/missing prices).
-    if sig == "NO_TRADE" and not _unreadable_or_missing_prices(result):
-        force_trade_instruction = instruction + "\n\nDODATKOWA REGUŁA: Jeśli is_chart=true i ceny są czytelne, MUSISZ zwrócić LONG albo SHORT. NO_TRADE wolno tylko gdy nie da się odczytać cen z osi (brak/nieczytelna oś ceny). Preferuj LIMIT entry w lepszej strefie zamiast market, jeśli nie ma idealnego setupu."
-        try:
-            result = _call_openai(force_trade_instruction)
-        except Exception:
-            # If retry fails, keep the original result.
-            pass
-
-        sig = str(result.get("signal") or "NO_TRADE").upper()
-        if sig not in ("LONG", "SHORT", "NO_TRADE"):
-            _force_no_trade("NO_TRADE: nieprawidłowy sygnał.")
-            sig = "NO_TRADE"
-        result["signal"] = sig
-
-    # Ensure NO_TRADE fields are clean.
     if sig == "NO_TRADE":
         result["entry"] = None
         result["stop_loss"] = None
         result["position_size"] = None
         result["take_profit"] = []
         if not isinstance(result.get("rationale"), list):
-            result["rationale"] = [str(result.get("rationale") or "")][:3]
+            result["rationale"] = [str(result.get("rationale") or "")]
         return result
 
-    # Normalize rationale list (does not block trades).
-    rat = result.get("rationale")
-    if not isinstance(rat, list):
-        rat = [str(rat)] if rat else []
-    rat = [str(x).strip() for x in rat if str(x).strip()]
-    # Keep it readable; UI will list items.
-    result["rationale"] = rat[:14]
-
-
-    # If model picked LONG/SHORT but couldn't provide numbers, treat as unreadable -> NO_TRADE.
+    # Must have entry + SL
     if result.get("entry") is None or result.get("stop_loss") is None:
-        _force_no_trade("NO_TRADE: brak czytelnych cen do ustawienia entry/SL (sprawdź czy oś ceny jest widoczna).")
+        _force_no_trade("NO_TRADE: missing entry or stop-loss.")
         return result
 
-    # Ensure take_profit has at least one level; if missing, derive a conservative TP1 from R:R≈1:2.
-    if not isinstance(result.get("take_profit"), list):
-        result["take_profit"] = []
-    if len(result.get("take_profit") or []) == 0:
-        e = _first_number(result.get("entry"))
-        sl = _first_number(result.get("stop_loss"))
-        if e is not None and sl is not None:
-            if sig == "LONG" and e > sl:
-                tp1 = e + 2.0 * (e - sl)
-                result["take_profit"] = [f"{tp1:.2f}"]
-            elif sig == "SHORT" and sl > e:
-                tp1 = e - 2.0 * (sl - e)
-                result["take_profit"] = [f"{tp1:.2f}"]
-
-    # Sanity-check numeric direction (best-effort).
     entry_n = _first_number(result.get("entry"))
     sl_n = _first_number(result.get("stop_loss"))
-    tp0_n = _first_number((result.get("take_profit") or [None])[0])
+    tps = result.get("take_profit") or []
+    if not isinstance(tps, list):
+        tps = []
+    tp0_n = _first_number(tps[0]) if tps else None
 
     if sig == "LONG" and entry_n is not None and sl_n is not None:
         if sl_n >= entry_n:
-            _force_no_trade("NO_TRADE: niespójne poziomy (dla LONG SL powinien być poniżej entry).")
+            _force_no_trade("NO_TRADE: inconsistent levels (for LONG, SL must be below entry).")
             return result
         if tp0_n is not None and tp0_n <= entry_n:
-            _force_no_trade("NO_TRADE: niespójne poziomy (dla LONG TP powinien być powyżej entry).")
+            _force_no_trade("NO_TRADE: inconsistent levels (for LONG, TP must be above entry).")
             return result
-
     if sig == "SHORT" and entry_n is not None and sl_n is not None:
         if sl_n <= entry_n:
-            _force_no_trade("NO_TRADE: niespójne poziomy (dla SHORT SL powinien być powyżej entry).")
+            _force_no_trade("NO_TRADE: inconsistent levels (for SHORT, SL must be above entry).")
             return result
         if tp0_n is not None and tp0_n >= entry_n:
-            _force_no_trade("NO_TRADE: niespójne poziomy (dla SHORT TP powinien być poniżej entry).")
+            _force_no_trade("NO_TRADE: inconsistent levels (for SHORT, TP must be below entry).")
             return result
+
+    # Ensure lists
+    if not isinstance(result.get("issues"), list):
+        result["issues"] = [str(result.get("issues") or "")]
+    if not isinstance(result.get("rationale"), list):
+        result["rationale"] = [str(result.get("rationale") or "")]
+    result["take_profit"] = [str(x) for x in (result.get("take_profit") or []) if str(x).strip()]
 
     return result
 
@@ -877,6 +759,8 @@ def inject_globals():
         PRO_PRICE_MONTHLY_PLN=PRO_PRICE_MONTHLY_PLN,
         PRO_PRICE_YEARLY_PLN=PRO_PRICE_YEARLY_PLN,
         STRIPE_PUBLISHABLE_KEY=STRIPE_PUBLISHABLE_KEY,
+        year=datetime.now(timezone.utc).year,
+        APP_VERSION=APP_VERSION,
     )
 
 
@@ -889,7 +773,9 @@ def index():
 @app.get("/pricing")
 def pricing():
     user = current_user()
-    return render_template("pricing.html", user=user, billing=billing_ui(user) if user else None, stripe_enabled=bool(STRIPE_SECRET_KEY and STRIPE_PRICE_MONTHLY and STRIPE_PRICE_YEARLY))
+    stripe_enabled = bool(STRIPE_SECRET_KEY and STRIPE_PRICE_MONTHLY and STRIPE_PRICE_YEARLY)
+    user_plan_label = plan_label(effective_plan(user)) if user else None
+    return render_template("pricing.html", user=user, user_plan_label=user_plan_label, stripe_enabled=stripe_enabled)
 
 
 @app.get("/login")
@@ -906,10 +792,10 @@ def login_post():
     db = get_db()
     row = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
     if not row or not check_password_hash(row["password_hash"], password):
-        flash("Nieprawidłowy email lub hasło.", "error")
+        flash("Invalid email or password.", "error")
         return redirect(url_for("login"))
     session["uid"] = row["id"]
-    flash("Zalogowano.", "ok")
+    flash("Logged in.", "ok")
     return redirect(url_for("dashboard"))
 
 
@@ -925,7 +811,7 @@ def signup_post():
     email = (request.form.get("email") or "").strip().lower()
     password = request.form.get("password") or ""
     if not email or not password:
-        flash("Uzupełnij email i hasło.", "error")
+        flash("Please enter email and password.", "error")
         return redirect(url_for("signup"))
 
     db = get_db()
@@ -942,12 +828,12 @@ def signup_post():
         )
         db.commit()
     except sqlite3.IntegrityError:
-        flash("Konto o tym emailu już istnieje.", "error")
+        flash("An account with this email already exists.", "error")
         return redirect(url_for("signup"))
 
     uid = db.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()["id"]
     session["uid"] = uid
-    flash("Konto utworzone. Możesz zacząć analizować.", "ok")
+    flash("Account created. You're ready to start.", "ok")
     return redirect(url_for("dashboard"))
 
 
@@ -956,7 +842,7 @@ def logout():
     from flask import session
 
     session.clear()
-    flash("Wylogowano.", "ok")
+    flash("Logged out.", "ok")
     return redirect(url_for("index"))
 
 
@@ -968,28 +854,32 @@ def dashboard():
     user = current_user()
 
     db = get_db()
-    last = db.execute(
-        "SELECT * FROM analyses WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user["id"],)
-    ).fetchone()
-    recent = db.execute(
-        "SELECT id, created_at, pair, timeframe FROM analyses WHERE user_id = ? ORDER BY id DESC LIMIT 8",
+    recent_analyses = db.execute(
+        "SELECT id, created_at, pair, timeframe, mode FROM analyses WHERE user_id = ? ORDER BY id DESC LIMIT 8",
+        (user["id"],),
+    ).fetchall()
+    recent_trades = db.execute(
+        "SELECT id, created_at, symbol, side, mode, pnl FROM trades WHERE user_id = ? ORDER BY id DESC LIMIT 8",
         (user["id"],),
     ).fetchall()
 
-    remaining = None
-    limit = monthly_limit_for_plan(effective_plan_for_limits(user))
-    if limit is not None:
-        remaining = max(0, int(limit) - int(user["analyses_used"] or 0))
+    eff_plan = effective_plan(user)
+    limit = monthly_limit_for_plan(eff_plan)
+    remaining = None if limit is None else max(0, int(limit) - int(user["analyses_used"] or 0))
+
+    perf = compute_performance(db, user["id"])
 
     return render_template(
         "dashboard.html",
+        app_shell=True,
         user=user,
-        billing=billing_ui(user),
-        last=last,
-        recent=recent,
+        user_plan_label=plan_label(eff_plan),
+        user_stripe_status=user.get("stripe_status"),
         remaining=remaining,
-        openai_enabled=bool(OPENAI_API_KEY),
-        stripe_enabled=bool(STRIPE_SECRET_KEY and STRIPE_PRICE_MONTHLY and STRIPE_PRICE_YEARLY),
+        recent_analyses=recent_analyses,
+        recent_trades=recent_trades,
+        perf=perf,
+        perf_currency="",
     )
 
 
@@ -1003,24 +893,69 @@ def analysis_view(analysis_id: int):
         (analysis_id, user["id"]),
     ).fetchone()
     if not row:
-        flash("Nie znaleziono analizy.", "error")
+        flash("Analysis not found.", "error")
         return redirect(url_for("dashboard"))
 
+    eff_plan = effective_plan(user)
+    limit = monthly_limit_for_plan(eff_plan)
+    remaining = None if limit is None else max(0, int(limit) - int(user["analyses_used"] or 0))
+
     result = json.loads(row["result_json"])
-    return render_template("analysis.html", user=user, row=row, result=result)
+    return render_template(
+        "analysis.html",
+        app_shell=True,
+        user=user,
+        user_plan_label=plan_label(eff_plan),
+        user_stripe_status=user.get("stripe_status"),
+        remaining=remaining,
+        row=row,
+        result=result,
+    )
 
 
 
 def _validate_image(file_storage):
     if not file_storage or not file_storage.filename:
-        raise ValueError("Brak pliku.")
+        raise ValueError("No file uploaded.")
     filename = secure_filename(file_storage.filename)
     if "." not in filename:
-        raise ValueError("Nieprawidłowy plik.")
+        raise ValueError("Invalid file.")
     ext = filename.rsplit(".", 1)[-1].lower()
     if ext not in ALLOWED_IMAGE_EXTS:
-        raise ValueError("Dozwolone formaty: PNG, JPG, JPEG, WEBP.")
+        raise ValueError("Allowed formats: PNG, JPG, JPEG, WEBP.")
     return filename, ext
+
+
+@app.get("/analyze")
+@login_required
+def analyze_page():
+    user = current_user()
+    reset_cycle_if_needed(user)
+    user = current_user()
+
+    eff_plan = effective_plan(user)
+    limit = monthly_limit_for_plan(eff_plan)
+    remaining = None if limit is None else max(0, int(limit) - int(user["analyses_used"] or 0))
+
+    stripe_enabled = bool(STRIPE_SECRET_KEY and STRIPE_PRICE_MONTHLY and STRIPE_PRICE_YEARLY)
+
+    return render_template(
+        "analyze.html",
+        app_shell=True,
+        user=user,
+        user_plan_label=plan_label(eff_plan),
+        user_stripe_status=user.get("stripe_status"),
+        remaining=remaining,
+        openai_enabled=bool(OPENAI_API_KEY),
+        stripe_enabled=stripe_enabled,
+        defaults={
+            "pair": user.get("default_pair") or "BTCUSDT",
+            "timeframe": user.get("default_timeframe") or "1H",
+            "capital": float(user.get("default_capital") or 1000),
+            "risk_fraction": float(user.get("default_risk_fraction") or 0.02),
+            "mode": (user.get("default_mode") or "swing"),
+        },
+    )
 
 
 @app.post("/analyze")
@@ -1031,12 +966,13 @@ def analyze():
     user = current_user()
 
     if not can_analyze(user):
-        flash("Limit analiz w tym miesiącu został wykorzystany. Przejdź na Pro.", "error")
+        flash("Free plan monthly limit reached. Upgrade to Pro to continue.", "error")
         return redirect(url_for("pricing"))
 
     # Inputs
     pair = (request.form.get("pair") or user["default_pair"] or "BTCUSDT").strip().upper()
     timeframe = (request.form.get("timeframe") or user["default_timeframe"] or "1H").strip().upper()
+    mode = (request.form.get("mode") or user.get("default_mode") or "swing").strip().lower()
 
     def _f(name: str, default: float) -> float:
         try:
@@ -1055,7 +991,7 @@ def analyze():
         filename, _ext = _validate_image(file)
     except ValueError as e:
         flash(str(e), "error")
-        return redirect(url_for("dashboard"))
+        return redirect(url_for("analyze_page"))
 
     image_bytes = file.read()
     image_mime = _infer_mime(filename)
@@ -1063,29 +999,30 @@ def analyze():
     # Persist defaults
     db = get_db()
     db.execute(
-        "UPDATE users SET default_pair = ?, default_timeframe = ?, default_capital = ?, default_risk_fraction = ? WHERE id = ?",
-        (pair, timeframe, capital, risk_fraction, user["id"]),
+        "UPDATE users SET default_pair = ?, default_timeframe = ?, default_capital = ?, default_risk_fraction = ?, default_mode = ? WHERE id = ?",
+        (pair, timeframe, capital, risk_fraction, mode, user["id"]),
     )
     db.commit()
 
     try:
-        result = analyze_with_openai(
+        result = analyze_with_openai_pro(
             image_bytes=image_bytes,
             image_mime=image_mime,
             pair=pair,
             timeframe=timeframe,
             capital=capital,
             risk_fraction=risk_fraction,
+            mode=mode,
             news_context=news_context,
         )
     except Exception as e:
-        flash(f"Analiza nieudana: {e}", "error")
-        return redirect(url_for("dashboard"))
+        flash(f"Analysis failed: {e}", "error")
+        return redirect(url_for("analyze_page"))
 
     # Save analysis
-    db.execute(
-        "INSERT INTO analyses (user_id, created_at, pair, timeframe, capital, risk_fraction, result_json, image_mime, image_b64) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    cur = db.execute(
+        "INSERT INTO analyses (user_id, created_at, pair, timeframe, capital, risk_fraction, mode, result_json, image_mime, image_b64) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             user["id"],
             datetime.now(timezone.utc).isoformat(),
@@ -1093,6 +1030,7 @@ def analyze():
             timeframe,
             capital,
             risk_fraction,
+            mode.upper(),
             json.dumps(result, ensure_ascii=False),
             image_mime,
             base64.b64encode(image_bytes).decode("utf-8"),
@@ -1101,9 +1039,654 @@ def analyze():
     db.execute("UPDATE users SET analyses_used = analyses_used + 1 WHERE id = ?", (user["id"],))
     db.commit()
 
-    flash("Analiza gotowa.", "ok")
-    return redirect(url_for("dashboard"))
+    analysis_id = int(cur.lastrowid)
+    flash("Analysis ready.", "ok")
+    return redirect(url_for("analysis_view", analysis_id=analysis_id))
 
+
+# -----------------------------
+# Journal + Performance + Learn + Calculator + Account
+# -----------------------------
+def _parse_float(val: object, default: float | None = None) -> float | None:
+    if val is None:
+        return default
+    s = str(val).strip()
+    if not s:
+        return default
+    try:
+        return float(s.replace(",", "."))
+    except Exception:
+        return default
+
+
+def _app_shell_context(user: sqlite3.Row) -> dict:
+    reset_cycle_if_needed(user)
+    user = current_user()  # refresh after possible reset
+
+    eff_plan = effective_plan(user)
+    limit = monthly_limit_for_plan(eff_plan)
+    remaining = None if limit is None else max(0, int(limit) - int(user["analyses_used"] or 0))
+
+    return {
+        "app_shell": True,
+        "user": user,
+        "user_plan_label": plan_label(eff_plan),
+        "user_stripe_status": user.get("stripe_status"),
+        "remaining": remaining,
+        "stripe_enabled": _stripe_ready(),
+    }
+
+
+def _compute_quick_stats(db: sqlite3.Connection, user_id: int) -> dict:
+    perf = compute_performance(db, user_id)
+    # map to fields used in Journal template
+    return {
+        "count": perf["trades"],
+        "win_rate": round(perf["win_rate"], 1),
+        "net_pnl": round(perf["net_pnl"], 2),
+        "expectancy": round(perf["expectancy_r"], 2),
+        "profit_factor": round(perf["profit_factor"], 2),
+    }
+
+
+def _compute_streaks(outcomes: list[int]) -> tuple[int, int]:
+    """outcomes: 1 win, -1 loss, 0 breakeven"""
+    best_win = 0
+    worst_loss = 0
+    cur_win = 0
+    cur_loss = 0
+    for o in outcomes:
+        if o == 1:
+            cur_win += 1
+            cur_loss = 0
+        elif o == -1:
+            cur_loss += 1
+            cur_win = 0
+        else:
+            cur_win = 0
+            cur_loss = 0
+        best_win = max(best_win, cur_win)
+        worst_loss = max(worst_loss, cur_loss)
+    return best_win, worst_loss
+
+
+def _performance_detail(db: sqlite3.Connection, user_id: int) -> tuple[dict, list[dict]]:
+    rows = db.execute(
+        """SELECT created_at, r_multiple, pnl
+           FROM trades
+           WHERE user_id = ? AND pnl IS NOT NULL
+           ORDER BY created_at ASC, id ASC""",
+        (user_id,),
+    ).fetchall()
+
+    total = len(rows)
+    wins = losses = be = 0
+    pnl_sum = 0.0
+    r_pos: list[float] = []
+    r_neg: list[float] = []
+    r_all: list[float] = []
+    pos_pnl = 0.0
+    neg_pnl = 0.0
+    outcomes: list[int] = []
+
+    for r in rows:
+        pnl = float(r["pnl"] or 0.0)
+        rm = r["r_multiple"]
+        pnl_sum += pnl
+        if pnl > 0:
+            wins += 1
+            pos_pnl += pnl
+            outcomes.append(1)
+        elif pnl < 0:
+            losses += 1
+            neg_pnl += pnl
+            outcomes.append(-1)
+        else:
+            be += 1
+            outcomes.append(0)
+
+        if rm is not None:
+            try:
+                rm_f = float(rm)
+                r_all.append(rm_f)
+                if rm_f > 0:
+                    r_pos.append(rm_f)
+                elif rm_f < 0:
+                    r_neg.append(rm_f)
+            except Exception:
+                pass
+
+    win_rate = (wins / total * 100.0) if total else 0.0
+    avg_win_r = (sum(r_pos) / len(r_pos)) if r_pos else 0.0
+    avg_loss_r = (sum(r_neg) / len(r_neg)) if r_neg else 0.0
+    expectancy_r = (sum(r_all) / len(r_all)) if r_all else 0.0
+    profit_factor = (pos_pnl / abs(neg_pnl)) if neg_pnl else (pos_pnl if pos_pnl else 0.0)
+
+    best_win_streak, worst_loss_streak = _compute_streaks(outcomes)
+
+    stats = {
+        "total_trades": total,
+        "wins": wins,
+        "losses": losses,
+        "be": be,
+        "win_rate": win_rate,
+        "avg_win_r": avg_win_r,
+        "avg_loss_r": avg_loss_r,
+        "net_pnl": pnl_sum,
+        "profit_factor": profit_factor,
+        "expectancy_r": expectancy_r,
+        "best_win_streak": best_win_streak,
+        "worst_loss_streak": worst_loss_streak,
+    }
+
+    # Monthly breakdown (YYYY-MM)
+    monthly_map: dict[str, dict] = {}
+    for r in rows:
+        month = str(r["created_at"])[:7]
+        bucket = monthly_map.setdefault(month, {"month": month, "trades": 0, "wins": 0, "net_pnl": 0.0})
+        bucket["trades"] += 1
+        pnl = float(r["pnl"] or 0.0)
+        bucket["net_pnl"] += pnl
+        if pnl > 0:
+            bucket["wins"] += 1
+
+    monthly = []
+    for month in sorted(monthly_map.keys(), reverse=True):
+        b = monthly_map[month]
+        wr = (b["wins"] / b["trades"] * 100.0) if b["trades"] else 0.0
+        monthly.append({"month": month, "trades": b["trades"], "net_pnl": b["net_pnl"], "win_rate": wr})
+
+    return stats, monthly
+
+
+def _compute_r_multiple(side: str, entry: float, stop: float, exit_price: float) -> float | None:
+    side = (side or "").upper().strip()
+    if side not in ("LONG", "SHORT"):
+        return None
+    if side == "LONG":
+        risk = entry - stop
+        reward = exit_price - entry
+    else:
+        risk = stop - entry
+        reward = entry - exit_price
+    if risk <= 0:
+        return None
+    return reward / risk
+
+
+@app.route("/journal", methods=["GET", "POST"])
+@login_required
+def journal():
+    user = current_user()
+    ctx = _app_shell_context(user)
+    user = ctx["user"]
+    db = get_db()
+
+    if request.method == "POST":
+        symbol = (request.form.get("symbol") or user.get("default_pair") or "BTCUSDT").strip().upper()
+        mode = (request.form.get("mode") or user.get("default_mode") or "swing").strip().lower()
+        if mode not in ("scalp", "swing"):
+            mode = "swing"
+        side = (request.form.get("side") or "LONG").strip().upper()
+        if side not in ("LONG", "SHORT"):
+            side = "LONG"
+
+        entry = _parse_float(request.form.get("entry"))
+        stop = _parse_float(request.form.get("stop"))
+        exit_price = _parse_float(request.form.get("exit"))
+        capital = _parse_float(request.form.get("capital"), float(user.get("default_capital") or 1000)) or 0.0
+        risk_fraction = _parse_float(request.form.get("risk_fraction"), float(user.get("default_risk_fraction") or 0.02)) or 0.0
+        notes = (request.form.get("notes") or "").strip()
+
+        r_multiple = None
+        pnl = None
+        if entry is not None and stop is not None and exit_price is not None:
+            r_multiple = _compute_r_multiple(side, entry, stop, exit_price)
+            if r_multiple is not None:
+                pnl = float(r_multiple) * float(capital) * float(risk_fraction)
+
+        db.execute(
+            """INSERT INTO trades
+               (user_id, created_at, symbol, mode, side, entry, stop_loss, exit_price, capital, risk_fraction, r_multiple, pnl, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                user["id"],
+                datetime.now(timezone.utc).isoformat(),
+                symbol,
+                mode,
+                side,
+                entry,
+                stop,
+                exit_price,
+                capital,
+                risk_fraction,
+                r_multiple,
+                pnl,
+                notes,
+            ),
+        )
+        db.commit()
+
+        # Persist journal defaults to user
+        db.execute(
+            "UPDATE users SET default_pair = ?, default_capital = ?, default_risk_fraction = ?, default_mode = ? WHERE id = ?",
+            (symbol, capital, risk_fraction, mode, user["id"]),
+        )
+        db.commit()
+
+        flash("Trade saved.", "ok")
+        return redirect(url_for("journal"))
+
+    trades = db.execute(
+        "SELECT * FROM trades WHERE user_id = ? ORDER BY id DESC LIMIT 30",
+        (user["id"],),
+    ).fetchall()
+
+    perf = _compute_quick_stats(db, user["id"])
+
+    return render_template(
+        "journal.html",
+        **ctx,
+        trades=trades,
+        perf=perf,
+        defaults={
+            "symbol": user.get("default_pair") or "BTCUSDT",
+            "mode": (user.get("default_mode") or "swing"),
+            "capital": float(user.get("default_capital") or 1000),
+            "risk_fraction": float(user.get("default_risk_fraction") or 0.02),
+        },
+    )
+
+
+@app.post("/journal/<int:trade_id>/delete")
+@login_required
+def journal_delete(trade_id: int):
+    user = current_user()
+    db = get_db()
+    db.execute("DELETE FROM trades WHERE id = ? AND user_id = ?", (trade_id, user["id"]))
+    db.commit()
+    flash("Trade deleted.", "ok")
+    return redirect(url_for("journal"))
+
+
+@app.get("/performance")
+@login_required
+def performance():
+    user = current_user()
+    ctx = _app_shell_context(user)
+    user = ctx["user"]
+    db = get_db()
+
+    stats, monthly = _performance_detail(db, user["id"])
+    return render_template("performance.html", **ctx, stats=stats, monthly=monthly)
+
+
+# ---------- Learn catalog ----------
+LESSONS: list[dict] = [
+    {
+        "id": "s1",
+        "module": "Foundations",
+        "title": "Market structure in 10 minutes",
+        "minutes": 10,
+        "body": [
+            "Your job is not to predict — it is to react to structure.",
+            "On any timeframe, structure is defined by swing highs/lows. Uptrend: HH/HL. Downtrend: LH/LL.",
+            "The cleanest entries happen after a break of structure (BOS) and a controlled pullback into a key level.",
+            "Avoid taking trades in the middle of a range. If you must trade a range, trade the edges with a tight invalidation.",
+        ],
+    },
+    {
+        "id": "s2",
+        "module": "Foundations",
+        "title": "Support & resistance that actually works",
+        "minutes": 12,
+        "body": [
+            "Mark only levels that caused displacement (fast move) or multiple clean reactions.",
+            "A level gets weaker the more obvious it is and the more times it is touched.",
+            "Treat levels as zones, not single lines. Use wicks + bodies for context.",
+            "Best confluence: structure + level + liquidity (stops above/below) + clear rejection candle.",
+        ],
+    },
+    {
+        "id": "s3",
+        "module": "Foundations",
+        "title": "Risk: the only thing you control",
+        "minutes": 8,
+        "body": [
+            "Pick a fixed risk per trade (e.g., 1–2%) and keep it constant.",
+            "Position size is a consequence of your stop distance — not the other way around.",
+            "If a setup forces a stop that is too wide for your risk, skip the trade.",
+            "Never move your stop farther. You can reduce risk, not increase it mid-trade.",
+        ],
+    },
+    {
+        "id": "l1",
+        "module": "Liquidity",
+        "title": "Liquidity sweeps and traps",
+        "minutes": 10,
+        "body": [
+            "Price loves obvious stop pools: equal highs/lows, range edges, and prior swing points.",
+            "A sweep is a quick move through a level followed by a fast rejection back inside.",
+            "After a sweep, wait for confirmation: change of character (CHoCH) on a lower timeframe, then retest.",
+            "Your stop should sit beyond the liquidity pool, not right under a local low.",
+        ],
+    },
+    {
+        "id": "l2",
+        "module": "Liquidity",
+        "title": "Order blocks (practical)",
+        "minutes": 12,
+        "body": [
+            "An order block is the last opposing candle before displacement.",
+            "Fresh (untested) zones tend to work better than mitigated ones.",
+            "Use them as areas for limit entries only when structure supports it.",
+            "If price slices through a zone with momentum, the zone is invalid.",
+        ],
+    },
+    {
+        "id": "e1",
+        "module": "Execution",
+        "title": "Entry triggers you can repeat",
+        "minutes": 10,
+        "body": [
+            "Pick a simple trigger: BOS/CHoCH + retest, or sweep + reclaim.",
+            "Avoid entries without invalidation. If you cannot define invalidation, you cannot size the trade.",
+            "Prefer limit entries at your level when possible. Market entries are for strong confirmations.",
+            "If you miss the trade, you miss it. Chasing is the fastest way to lose edge.",
+        ],
+    },
+    {
+        "id": "e2",
+        "module": "Execution",
+        "title": "Take profit & trade management",
+        "minutes": 12,
+        "body": [
+            "Take profit at logical magnets: prior highs/lows, range edges, liquidity pools.",
+            "Scaling out is optional. If you scale, do it at predefined levels — not emotions.",
+            "Break-even is a tool, not a religion. Use it when structure confirms your direction.",
+            "Track results in R-multiple. It keeps you honest across position sizes.",
+        ],
+    },
+]
+
+
+def _lesson_by_id(lesson_id: str) -> dict | None:
+    for l in LESSONS:
+        if l["id"] == lesson_id:
+            return l
+    return None
+
+
+@app.get("/learn")
+@login_required
+def learn():
+    user = current_user()
+    ctx = _app_shell_context(user)
+    user = ctx["user"]
+    db = get_db()
+
+    completed_rows = db.execute(
+        "SELECT lesson_id FROM lesson_progress WHERE user_id = ?",
+        (user["id"],),
+    ).fetchall()
+    completed_ids = {r["lesson_id"] for r in completed_rows}
+
+    # Group by module
+    modules_map: dict[str, dict] = {}
+    for l in LESSONS:
+        mod = l["module"]
+        if mod not in modules_map:
+            modules_map[mod] = {"title": mod, "description": "", "lessons": []}
+        modules_map[mod]["lessons"].append({"id": l["id"], "title": l["title"]})
+
+    # Nice descriptions
+    desc = {
+        "Foundations": "Structure, levels, and risk — the non-negotiables.",
+        "Liquidity": "Sweeps, traps, and high-probability areas.",
+        "Execution": "Repeatable triggers and management rules.",
+    }
+    for k, v in modules_map.items():
+        v["description"] = desc.get(k, "")
+
+    modules = [modules_map[k] for k in ["Foundations", "Liquidity", "Execution"] if k in modules_map]
+
+    progress = {
+        "completed": len(completed_ids),
+        "total": len(LESSONS),
+        "percent": int(round((len(completed_ids) / len(LESSONS) * 100.0), 0)) if LESSONS else 0,
+    }
+
+    return render_template(
+        "learn.html",
+        **ctx,
+        lessons=[{"id": l["id"], "title": l["title"]} for l in LESSONS],
+        modules=modules,
+        completed_ids=completed_ids,
+        progress=progress,
+    )
+
+
+@app.get("/learn/<lesson_id>")
+@login_required
+def lesson(lesson_id: str):
+    user = current_user()
+    ctx = _app_shell_context(user)
+    user = ctx["user"]
+    db = get_db()
+
+    l = _lesson_by_id(lesson_id)
+    if not l:
+        flash("Lesson not found.", "error")
+        return redirect(url_for("learn"))
+
+    row = db.execute(
+        "SELECT 1 FROM lesson_progress WHERE user_id = ? AND lesson_id = ? LIMIT 1",
+        (user["id"], lesson_id),
+    ).fetchone()
+    is_completed = bool(row)
+
+    return render_template("lesson.html", **ctx, lesson=l, is_completed=is_completed)
+
+
+@app.post("/learn/<lesson_id>/toggle")
+@login_required
+def learn_toggle(lesson_id: str):
+    user = current_user()
+    db = get_db()
+    l = _lesson_by_id(lesson_id)
+    if not l:
+        flash("Lesson not found.", "error")
+        return redirect(url_for("learn"))
+
+    exists = db.execute(
+        "SELECT id FROM lesson_progress WHERE user_id = ? AND lesson_id = ?",
+        (user["id"], lesson_id),
+    ).fetchone()
+    if exists:
+        db.execute("DELETE FROM lesson_progress WHERE user_id = ? AND lesson_id = ?", (user["id"], lesson_id))
+        db.commit()
+        flash("Marked as not completed.", "ok")
+    else:
+        db.execute("INSERT INTO lesson_progress (user_id, lesson_id, completed_at) VALUES (?, ?, ?)", (user["id"], lesson_id, datetime.now(timezone.utc).isoformat()))
+        db.commit()
+        flash("Marked as completed.", "ok")
+
+    return redirect(url_for("lesson", lesson_id=lesson_id))
+
+
+@app.route("/calculator", methods=["GET", "POST"])
+@login_required
+def calculator():
+    user = current_user()
+    ctx = _app_shell_context(user)
+    user = ctx["user"]
+
+    defaults = {
+        "capital": float(user.get("default_capital") or 1000),
+        "risk_pct": round(float(user.get("default_risk_fraction") or 0.02) * 100.0, 2),
+        "entry": "",
+        "stop": "",
+        "tp": "",
+    }
+    calc = None
+
+    if request.method == "POST":
+        capital = _parse_float(request.form.get("capital"), defaults["capital"]) or 0.0
+        risk_pct = _parse_float(request.form.get("risk_pct"), defaults["risk_pct"]) or 0.0
+        entry = _parse_float(request.form.get("entry"))
+        stop = _parse_float(request.form.get("stop"))
+        tp = _parse_float(request.form.get("tp"))
+
+        defaults.update(
+            {
+                "capital": capital,
+                "risk_pct": risk_pct,
+                "entry": request.form.get("entry") or "",
+                "stop": request.form.get("stop") or "",
+                "tp": request.form.get("tp") or "",
+            }
+        )
+
+        if entry is None or stop is None:
+            flash("Please provide Entry and Stop.", "error")
+        else:
+            risk_amount = capital * (risk_pct / 100.0)
+            stop_distance = abs(entry - stop)
+            units = (risk_amount / stop_distance) if stop_distance else 0.0
+            notional = units * entry
+
+            rr = None
+            if tp is not None and stop_distance:
+                rr = abs(tp - entry) / stop_distance
+
+            calc = {
+                "risk_amount": f"{risk_amount:.2f}",
+                "stop_distance": f"{stop_distance:.6f}" if stop_distance < 1 else f"{stop_distance:.2f}",
+                "units": f"{units:.6f}" if units < 1 else f"{units:.2f}",
+                "notional": f"{notional:.2f}",
+                "rr": f"{rr:.2f}" if rr is not None else None,
+            }
+
+    return render_template("calculator.html", **ctx, defaults=defaults, calc=calc)
+
+
+@app.route("/account", methods=["GET", "POST"])
+@login_required
+def account():
+    user = current_user()
+    ctx = _app_shell_context(user)
+    user = ctx["user"]
+    db = get_db()
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip()
+
+        if action == "update_defaults":
+            default_pair = (request.form.get("default_pair") or "").strip().upper() or "BTCUSDT"
+            default_timeframe = (request.form.get("default_timeframe") or "").strip().upper() or "1H"
+            default_capital = _parse_float(request.form.get("default_capital"), float(user.get("default_capital") or 1000)) or 1000.0
+            default_risk_fraction = _parse_float(request.form.get("default_risk_fraction"), float(user.get("default_risk_fraction") or 0.02)) or 0.02
+            default_mode = (request.form.get("default_mode") or user.get("default_mode") or "swing").strip().lower()
+            if default_mode not in ("scalp", "swing"):
+                default_mode = "swing"
+
+            db.execute(
+                """UPDATE users
+                   SET default_pair=?, default_timeframe=?, default_capital=?, default_risk_fraction=?, default_mode=?
+                   WHERE id=?""",
+                (default_pair, default_timeframe, default_capital, default_risk_fraction, default_mode, user["id"]),
+            )
+            db.commit()
+            flash("Defaults saved.", "ok")
+            return redirect(url_for("account"))
+
+        if action == "change_password":
+            current_password = request.form.get("current_password") or ""
+            new_password = request.form.get("new_password") or ""
+            row = db.execute("SELECT password_hash FROM users WHERE id = ?", (user["id"],)).fetchone()
+            if not row or not check_password_hash(row["password_hash"], current_password):
+                flash("Current password is incorrect.", "error")
+                return redirect(url_for("account"))
+            if len(new_password) < 6:
+                flash("New password must be at least 6 characters.", "error")
+                return redirect(url_for("account"))
+
+            db.execute("UPDATE users SET password_hash = ? WHERE id = ?", (generate_password_hash(new_password), user["id"]))
+            db.commit()
+            flash("Password updated.", "ok")
+            return redirect(url_for("account"))
+
+        if action == "delete_account":
+            confirm_password = request.form.get("confirm_password") or ""
+            row = db.execute("SELECT password_hash, stripe_subscription_id FROM users WHERE id = ?", (user["id"],)).fetchone()
+            if not row or not check_password_hash(row["password_hash"], confirm_password):
+                flash("Password is incorrect.", "error")
+                return redirect(url_for("account"))
+
+            # Try to cancel subscription (best-effort)
+            try:
+                if STRIPE_SECRET_KEY and row["stripe_subscription_id"]:
+                    stripe.Subscription.delete(row["stripe_subscription_id"])
+            except Exception:
+                pass
+
+            db.execute("DELETE FROM analyses WHERE user_id = ?", (user["id"],))
+            db.execute("DELETE FROM trades WHERE user_id = ?", (user["id"],))
+            db.execute("DELETE FROM lesson_progress WHERE user_id = ?", (user["id"],))
+            db.execute("DELETE FROM users WHERE id = ?", (user["id"],))
+            db.commit()
+
+            session.clear()
+            flash("Account deleted.", "ok")
+            return redirect(url_for("index"))
+
+        flash("Unknown action.", "error")
+        return redirect(url_for("account"))
+
+    return render_template("account.html", **ctx)
+
+
+@app.get("/account/export")
+@login_required
+def account_export():
+    user = current_user()
+    db = get_db()
+
+    user_row = db.execute(
+        "SELECT id, email, plan, created_at, analyses_used, cycle_month, default_pair, default_timeframe, default_capital, default_risk_fraction, default_mode FROM users WHERE id = ?",
+        (user["id"],),
+    ).fetchone()
+    analyses = db.execute(
+        "SELECT id, created_at, pair, timeframe, capital, risk_fraction, mode, result_json FROM analyses WHERE user_id = ? ORDER BY id ASC",
+        (user["id"],),
+    ).fetchall()
+    trades = db.execute(
+        "SELECT id, created_at, symbol, mode, side, entry, stop_loss, exit_price, capital, risk_fraction, r_multiple, pnl, notes FROM trades WHERE user_id = ? ORDER BY id ASC",
+        (user["id"],),
+    ).fetchall()
+    lessons = db.execute(
+        "SELECT lesson_id FROM lesson_progress WHERE user_id = ? ORDER BY id ASC",
+        (user["id"],),
+    ).fetchall()
+
+    payload = {
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "user": dict(user_row) if user_row else {},
+        "analyses": [dict(a) for a in analyses],
+        "trades": [dict(t) for t in trades],
+        "lesson_progress": [r["lesson_id"] for r in lessons],
+        "notes": "Analysis screenshots are not included in this export to keep the file small.",
+    }
+
+    data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    filename = "traderai-export.json"
+    return Response(
+        data,
+        mimetype="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        },
+    )
 
 # -----------------------------
 # Stripe billing
@@ -1112,21 +1695,202 @@ def _stripe_ready() -> bool:
     return bool(STRIPE_SECRET_KEY and STRIPE_PRICE_MONTHLY and STRIPE_PRICE_YEARLY)
 
 
+def _plan_from_price_id(price_id: str | None) -> str:
+    if price_id and STRIPE_PRICE_YEARLY and price_id == STRIPE_PRICE_YEARLY:
+        return "pro_yearly"
+    return "pro_monthly"
+
+
+def _apply_subscription_to_user(db: sqlite3.Connection, user_id: int, sub: dict | None) -> None:
+    """Persist subscription snapshot to the users table."""
+    if not sub:
+        db.execute(
+            """UPDATE users
+               SET plan='free',
+                   stripe_subscription_id=NULL,
+                   stripe_status=NULL,
+                   stripe_cancel_at_period_end=0,
+                   stripe_current_period_end=0,
+                   stripe_grace_until=0
+               WHERE id=?""",
+            (user_id,),
+        )
+        db.commit()
+        return
+
+    status = (sub.get("status") or "").lower().strip()
+    sub_id = sub.get("id")
+    cancel_at_period_end = 1 if sub.get("cancel_at_period_end") else 0
+    period_end = int(sub.get("current_period_end") or 0)
+
+    # Determine plan from price id (fallback to monthly)
+    price_id = None
+    try:
+        price_id = sub["items"]["data"][0]["price"]["id"]
+    except Exception:
+        price_id = None
+    plan = _plan_from_price_id(price_id)
+
+    # If subscription is clearly inactive, revert to Free.
+    if status in ("canceled", "incomplete_expired"):
+        plan = "free"
+        sub_id = None
+
+    # Grace: for past_due/unpaid we keep access until period_end (already paid period)
+    grace_until = 0
+    if status in ("past_due", "unpaid"):
+        grace_until = period_end
+
+    db.execute(
+        """UPDATE users
+           SET plan=?,
+               stripe_subscription_id=?,
+               stripe_status=?,
+               stripe_cancel_at_period_end=?,
+               stripe_current_period_end=?,
+               stripe_grace_until=?
+           WHERE id=?""",
+        (plan, sub_id, status or None, cancel_at_period_end, period_end, grace_until, user_id),
+    )
+    db.commit()
+
+
+def _get_or_create_customer(db: sqlite3.Connection, user: sqlite3.Row) -> str:
+    customer_id = user.get("stripe_customer_id")
+    if customer_id:
+        return customer_id
+
+    cust = stripe.Customer.create(email=user["email"], metadata={"user_id": str(user["id"])})
+    customer_id = cust["id"]
+    db.execute("UPDATE users SET stripe_customer_id = ? WHERE id = ?", (customer_id, user["id"]))
+    db.commit()
+    return customer_id
+
+
+def _sync_user_from_stripe(user_id: int) -> None:
+    """Best-effort sync: pull subscription status from Stripe."""
+    if not _stripe_ready():
+        return
+
+    db = get_db()
+    user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user or not user.get("stripe_customer_id"):
+        return
+
+    sub = None
+    try:
+        if user.get("stripe_subscription_id"):
+            sub = stripe.Subscription.retrieve(user["stripe_subscription_id"])
+        else:
+            subs = stripe.Subscription.list(customer=user["stripe_customer_id"], status="all", limit=10)
+            # pick newest non-canceled first
+            data = subs.get("data", []) if isinstance(subs, dict) else getattr(subs, "data", [])
+            # sort by created desc
+            data = sorted(data, key=lambda s: int(s.get("created") or 0), reverse=True)
+            for s in data:
+                st = (s.get("status") or "").lower()
+                if st not in ("canceled", "incomplete_expired"):
+                    sub = s
+                    break
+            if not sub and data:
+                sub = data[0]
+    except Exception:
+        sub = None
+
+    _apply_subscription_to_user(db, user_id, sub)
+
+
+@app.get("/billing")
+@login_required
+def billing():
+    user = current_user()
+    ctx = _app_shell_context(user)
+    user = ctx["user"]
+
+    period_end_ts = int(user.get("stripe_current_period_end") or 0)
+    period_end = None
+    if period_end_ts:
+        period_end = datetime.fromtimestamp(period_end_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+
+    return render_template(
+        "billing.html",
+        **ctx,
+        period_end=period_end,
+        cancel_at_period_end=bool(user.get("stripe_cancel_at_period_end")),
+    )
+
+
+@app.post("/billing/sync")
+@login_required
+def billing_sync():
+    if not _stripe_ready():
+        flash("Stripe is not configured on this deployment.", "error")
+        return redirect(url_for("billing"))
+
+    user = current_user()
+    if not user.get("stripe_customer_id"):
+        flash("No Stripe customer found for this account.", "error")
+        return redirect(url_for("billing"))
+
+    _sync_user_from_stripe(user["id"])
+    flash("Synced with Stripe.", "ok")
+    return redirect(url_for("billing"))
+
+
+@app.post("/billing/cancel")
+@login_required
+def billing_cancel():
+    if not _stripe_ready():
+        flash("Stripe is not configured on this deployment.", "error")
+        return redirect(url_for("billing"))
+
+    user = current_user()
+    if not user.get("stripe_subscription_id"):
+        flash("No active subscription found.", "error")
+        return redirect(url_for("billing"))
+
+    try:
+        sub = stripe.Subscription.modify(user["stripe_subscription_id"], cancel_at_period_end=True)
+        db = get_db()
+        _apply_subscription_to_user(db, user["id"], sub)
+        flash("Subscription will cancel at period end.", "ok")
+    except Exception as e:
+        flash(f"Cancel failed: {e}", "error")
+
+    return redirect(url_for("billing"))
+
+
+@app.post("/billing/resume")
+@login_required
+def billing_resume():
+    if not _stripe_ready():
+        flash("Stripe is not configured on this deployment.", "error")
+        return redirect(url_for("billing"))
+
+    user = current_user()
+    if not user.get("stripe_subscription_id"):
+        flash("No subscription found.", "error")
+        return redirect(url_for("billing"))
+
+    try:
+        sub = stripe.Subscription.modify(user["stripe_subscription_id"], cancel_at_period_end=False)
+        db = get_db()
+        _apply_subscription_to_user(db, user["id"], sub)
+        flash("Subscription resumed.", "ok")
+    except Exception as e:
+        flash(f"Resume failed: {e}", "error")
+
+    return redirect(url_for("billing"))
+
+
 @app.post("/billing/checkout")
 @login_required
 def billing_checkout():
     if not _stripe_ready():
-        flash("Płatności nie są skonfigurowane (Stripe).", "error")
+        flash("Stripe payments are not configured on this deployment.", "error")
         return redirect(url_for("pricing"))
 
     user = current_user()
-
-    # Avoid creating duplicate subscriptions (send user to Stripe Portal)
-    existing_status = (user["stripe_status"] or "").lower()
-    if user["stripe_subscription_id"] and existing_status in ("active", "trialing", "past_due", "pending"):
-        flash("Masz już subskrypcję powiązaną z tym kontem. Zarządzaj nią w panelu płatności.", "info")
-        return redirect(url_for("billing_portal"))
-
     plan = request.form.get("plan") or "pro_monthly"
     if plan not in ("pro_monthly", "pro_yearly"):
         plan = "pro_monthly"
@@ -1136,12 +1900,7 @@ def billing_checkout():
 
     # Create or reuse customer
     db = get_db()
-    customer_id = user["stripe_customer_id"]
-    if not customer_id:
-        cust = stripe.Customer.create(email=user["email"], metadata={"user_id": str(user["id"])})
-        customer_id = cust["id"]
-        db.execute("UPDATE users SET stripe_customer_id = ? WHERE id = ?", (customer_id, user["id"]))
-        db.commit()
+    customer_id = _get_or_create_customer(db, user)
 
     base_url = request.url_root.rstrip("/")
     success_url = f"{base_url}{url_for('billing_success')}?session_id={{CHECKOUT_SESSION_ID}}"
@@ -1162,175 +1921,10 @@ def billing_checkout():
 @app.get("/billing/success")
 @login_required
 def billing_success():
-    flash("Płatność rozpoczęta. Jeśli webhooki Stripe są poprawnie ustawione, plan zmieni się automatycznie.", "ok")
-    return redirect(url_for("dashboard"))
+    # Webhook normally updates status. Sync is available in Billing tab if needed.
+    flash("Checkout started. If Stripe webhooks are configured, your plan will update automatically.", "ok")
+    return redirect(url_for("billing"))
 
-@app.post("/billing/sync")
-@login_required
-def billing_sync():
-    """Fetch the latest subscription state from Stripe and update our DB (self-healing)."""
-    if not _stripe_ready():
-        flash("Stripe nie jest skonfigurowany.", "error")
-        return redirect(url_for("pricing"))
-
-    user = current_user()
-    if not user["stripe_customer_id"]:
-        flash("Brak klienta Stripe dla tego konta.", "error")
-        return redirect(url_for("pricing"))
-
-    try:
-        subs = stripe.Subscription.list(customer=user["stripe_customer_id"], status="all", limit=10)
-        data = list(subs.get("data") or [])
-    except Exception:
-        flash("Nie udało się pobrać subskrypcji ze Stripe.", "error")
-        return redirect(request.referrer or url_for("dashboard"))
-
-    def _pick_best(subs_list):
-        if not subs_list:
-            return None
-        # Prefer currently meaningful statuses
-        prio = {"active": 0, "trialing": 1, "past_due": 2, "paused": 3, "unpaid": 4, "canceled": 5, "incomplete": 6, "incomplete_expired": 7}
-        subs_list = sorted(
-            subs_list,
-            key=lambda s: (prio.get((s.get("status") or "").lower(), 50), -int(s.get("created") or 0)),
-        )
-        return subs_list[0]
-
-    sub = _pick_best(data)
-    db = get_db()
-
-    if not sub:
-        db.execute(
-            """
-            UPDATE users
-            SET plan='free',
-                stripe_subscription_id=NULL,
-                stripe_status=NULL,
-                stripe_cancel_at_period_end=NULL,
-                stripe_current_period_end=NULL,
-                stripe_grace_until=NULL
-            WHERE id=?
-            """,
-            (user["id"],),
-        )
-        db.commit()
-        flash("Nie znaleziono aktywnej subskrypcji w Stripe. Ustawiono plan Free.", "info")
-        return redirect(request.referrer or url_for("dashboard"))
-
-    status = (sub.get("status") or "").lower()
-    sub_id = sub.get("id")
-    cancel_at_period_end = bool(sub.get("cancel_at_period_end", False))
-    current_period_end = sub.get("current_period_end")
-
-    # Price → plan
-    price_id = None
-    try:
-        price_id = sub["items"]["data"][0]["price"]["id"]
-    except Exception:
-        price_id = None
-    plan = "pro_yearly" if price_id == STRIPE_PRICE_YEARLY else "pro_monthly"
-
-    # Past due grace
-    grace_until = None
-    if status == "past_due":
-        grace_until = _now_ts() + 3 * 24 * 3600
-
-    ended = status in ("canceled", "unpaid", "incomplete", "incomplete_expired", "paused")
-    if ended:
-        plan = "free"
-        sub_id = None
-        cancel_at_period_end = None
-        current_period_end = None
-        grace_until = None
-
-    db.execute(
-        """
-        UPDATE users
-        SET plan=?,
-            stripe_subscription_id=?,
-            stripe_status=?,
-            stripe_cancel_at_period_end=?,
-            stripe_current_period_end=?,
-            stripe_grace_until=?
-        WHERE id=?
-        """,
-        (
-            plan,
-            sub_id,
-            status,
-            None if cancel_at_period_end is None else int(bool(cancel_at_period_end)),
-            current_period_end,
-            grace_until,
-            user["id"],
-        ),
-    )
-    db.commit()
-
-    flash("Status płatności został odświeżony.", "ok")
-    return redirect(request.referrer or url_for("dashboard"))
-
-
-@app.post("/billing/cancel")
-@login_required
-def billing_cancel():
-    """Cancel subscription at period end."""
-    if not _stripe_ready():
-        flash("Stripe nie jest skonfigurowany.", "error")
-        return redirect(url_for("pricing"))
-
-    user = current_user()
-    sub_id = user["stripe_subscription_id"]
-    if not sub_id:
-        flash("Nie znaleziono aktywnej subskrypcji do anulowania.", "error")
-        return redirect(request.referrer or url_for("dashboard"))
-
-    try:
-        sub = stripe.Subscription.modify(sub_id, cancel_at_period_end=True)
-    except Exception:
-        flash("Nie udało się anulować subskrypcji w Stripe.", "error")
-        return redirect(request.referrer or url_for("dashboard"))
-
-    # Update local flags immediately (webhook will also update)
-    db = get_db()
-    db.execute(
-        "UPDATE users SET stripe_cancel_at_period_end=? WHERE id=?",
-        (int(bool(sub.get("cancel_at_period_end", True))), user["id"]),
-    )
-    db.commit()
-
-    flash("Subskrypcja zostanie anulowana na koniec okresu rozliczeniowego.", "ok")
-    return redirect(request.referrer or url_for("dashboard"))
-
-
-@app.post("/billing/resume")
-@login_required
-def billing_resume():
-    """Resume subscription (turn off cancel_at_period_end)."""
-    if not _stripe_ready():
-        flash("Stripe nie jest skonfigurowany.", "error")
-        return redirect(url_for("pricing"))
-
-    user = current_user()
-    sub_id = user["stripe_subscription_id"]
-    if not sub_id:
-        flash("Nie znaleziono subskrypcji do wznowienia.", "error")
-        return redirect(request.referrer or url_for("dashboard"))
-
-    try:
-        sub = stripe.Subscription.modify(sub_id, cancel_at_period_end=False)
-    except Exception:
-        flash("Nie udało się wznowić subskrypcji w Stripe.", "error")
-        return redirect(request.referrer or url_for("dashboard"))
-
-    db = get_db()
-    db.execute(
-        "UPDATE users SET stripe_cancel_at_period_end=? WHERE id=?",
-        (int(bool(sub.get("cancel_at_period_end", False))), user["id"]),
-    )
-    db.commit()
-
-    flash("Subskrypcja została wznowiona.", "ok")
-    return redirect(request.referrer or url_for("dashboard"))
 
 @app.post("/stripe/webhook")
 def stripe_webhook():
@@ -1347,106 +1941,52 @@ def stripe_webhook():
 
     etype = event.get("type")
     obj = event["data"]["object"]
-
     db = get_db()
 
-    def _set_user_billing(
-        user_id: int,
-        plan: str,
-        sub_id: str | None,
-        status: str | None,
-        *,
-        cancel_at_period_end: bool | None = None,
-        current_period_end: int | None = None,
-        grace_until: int | None = None,
-    ):
-        db.execute(
-            """
-            UPDATE users
-            SET
-                plan = ?,
-                stripe_subscription_id = ?,
-                stripe_status = ?,
-                stripe_cancel_at_period_end = ?,
-                stripe_current_period_end = ?,
-                stripe_grace_until = ?
-            WHERE id = ?
-            """,
-            (
-                plan,
-                sub_id,
-                status,
-                None if cancel_at_period_end is None else int(bool(cancel_at_period_end)),
-                current_period_end,
-                grace_until,
-                user_id,
-            ),
-        )
-        db.commit()
-
-    # 1) Checkout completed — ensure we know which user paid
+    # 1) Checkout completed — link subscription to user
     if etype == "checkout.session.completed":
         user_id = int(obj.get("metadata", {}).get("user_id", "0") or 0)
-        plan = obj.get("metadata", {}).get("plan") or "pro_monthly"
         sub_id = obj.get("subscription")
-        if user_id:
-            # mark as pending; final status comes from subscription.updated
-            _set_user_billing(user_id, plan, sub_id, "pending")
+        if user_id and sub_id:
+            db.execute(
+                "UPDATE users SET stripe_subscription_id = ? WHERE id = ?",
+                (sub_id, user_id),
+            )
+            db.commit()
+            # Pull subscription snapshot right away
+            try:
+                sub = stripe.Subscription.retrieve(sub_id)
+                _apply_subscription_to_user(db, user_id, sub)
+            except Exception:
+                pass
 
-    # 2) Subscription lifecycle
+    # 2) Subscription lifecycle events
     if etype in ("customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"):
         sub = obj
         customer_id = sub.get("customer")
-        status = (sub.get("status") or "").lower()
-        sub_id = sub.get("id")
-
-        cancel_at_period_end = bool(sub.get("cancel_at_period_end", False))
-        current_period_end = sub.get("current_period_end")
-
-        # Simple grace window on payment failures (prevents unlimited usage on past_due)
-        grace_until = None
-        if status == "past_due":
-            grace_until = _now_ts() + 3 * 24 * 3600  # 3 days
-
-        # Find user by customer id
-        u = db.execute("SELECT * FROM users WHERE stripe_customer_id = ?", (customer_id,)).fetchone()
+        u = None
+        if customer_id:
+            u = db.execute("SELECT * FROM users WHERE stripe_customer_id = ?", (customer_id,)).fetchone()
         if u:
-            # Determine plan from price id
-            price_id = None
-            try:
-                price_id = sub["items"]["data"][0]["price"]["id"]
-            except Exception:
-                price_id = None
-
-            ended = (etype == "customer.subscription.deleted") or status in (
-                "canceled",
-                "unpaid",
-                "incomplete",
-                "incomplete_expired",
-                "paused",
-            )
-
-            if ended:
-                _set_user_billing(
-                    u["id"],
-                    "free",
-                    None,
-                    status,
-                    cancel_at_period_end=None,
-                    current_period_end=None,
-                    grace_until=None,
-                )
+            if etype == "customer.subscription.deleted":
+                _apply_subscription_to_user(db, u["id"], None)
             else:
-                plan = "pro_yearly" if price_id == STRIPE_PRICE_YEARLY else "pro_monthly"
-                _set_user_billing(
-                    u["id"],
-                    plan,
-                    sub_id,
-                    status,
-                    cancel_at_period_end=cancel_at_period_end,
-                    current_period_end=current_period_end,
-                    grace_until=grace_until,
-                )
+                _apply_subscription_to_user(db, u["id"], sub)
+
+    # 3) Payment failures — keep grace until period_end if possible
+    if etype in ("invoice.payment_failed", "invoice.payment_action_required"):
+        customer_id = obj.get("customer")
+        u = None
+        if customer_id:
+            u = db.execute("SELECT * FROM users WHERE stripe_customer_id = ?", (customer_id,)).fetchone()
+        if u:
+            try:
+                sub_id = obj.get("subscription") or u.get("stripe_subscription_id")
+                if sub_id:
+                    sub = stripe.Subscription.retrieve(sub_id)
+                    _apply_subscription_to_user(db, u["id"], sub)
+            except Exception:
+                pass
 
     return ("ok", 200)
 
@@ -1455,20 +1995,19 @@ def stripe_webhook():
 @login_required
 def billing_portal():
     if not STRIPE_SECRET_KEY:
-        flash("Stripe nie jest skonfigurowany.", "error")
-        return redirect(url_for("pricing"))
+        flash("Stripe is not configured on this deployment.", "error")
+        return redirect(url_for("billing"))
     user = current_user()
-    if not user["stripe_customer_id"]:
-        flash("Brak klienta Stripe dla tego konta.", "error")
-        return redirect(url_for("pricing"))
+    if not user.get("stripe_customer_id"):
+        flash("No Stripe customer found for this account.", "error")
+        return redirect(url_for("billing"))
 
     base_url = request.url_root.rstrip("/")
     portal = stripe.billing_portal.Session.create(
         customer=user["stripe_customer_id"],
-        return_url=f"{base_url}{url_for('dashboard')}",
+        return_url=f"{base_url}{url_for('billing')}",
     )
     return redirect(portal.url, code=303)
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))

@@ -1,0 +1,39 @@
+{% extends "layout_app.html" %}
+{% set page_title = "Learn" %}
+{% set active = "learn" %}
+
+{% block app_content %}
+  <div class="card">
+    <div class="card__title">Trading lessons</div>
+    <div class="muted">Short, practical modules. Mark lessons as completed to track progress.</div>
+
+    <div class="cta-strip" style="margin-top:12px">
+      <div>
+        <div class="cta-strip__title">Progress</div>
+        <div class="muted">{{ progress.completed }} / {{ progress.total }} completed ({{ progress.percent }}%)</div>
+      </div>
+      <a class="btn btn--ghost" href="{{ url_for('lesson', lesson_id=lessons[0].id) }}">Start learning</a>
+    </div>
+  </div>
+
+  <div class="grid2" style="margin-top:16px">
+    {% for module in modules %}
+      <div class="card">
+        <div class="card__title">{{ module.title }}</div>
+        <div class="muted" style="margin-bottom:10px">{{ module.description }}</div>
+        <div class="list">
+          {% for l in module.lessons %}
+            <a class="list__row" href="{{ url_for('lesson', lesson_id=l.id) }}">
+              <span>{{ l.title }}</span>
+              {% if l.id in completed_ids %}
+                <span class="chip">Completed</span>
+              {% else %}
+                <span class="muted">Open</span>
+              {% endif %}
+            </a>
+          {% endfor %}
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+{% endblock %}

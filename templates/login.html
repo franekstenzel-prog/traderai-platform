@@ -1,24 +1,23 @@
 {% extends "base.html" %}
-{% block title %}TraderAI — Logowanie{% endblock %}
+{% block title %}TraderAI — Log in{% endblock %}
 {% block content %}
 <section class="auth">
   <div class="card auth__card">
-    <h1>Zaloguj się</h1>
-    <p class="muted">Dostęp do dashboardu i limitów.</p>
-
-    <form method="post" action="{{ url_for('login_post') }}" class="form">
-      <label>Email</label>
-      <input name="email" type="email" placeholder="you@example.com" required />
-
-      <label>Hasło</label>
-      <input name="password" type="password" placeholder="••••••••" required />
-
-      <button class="btn btn--primary w100" type="submit">Zaloguj</button>
+    <div class="card__title">Log in</div>
+    <form class="form" action="{{ url_for('login_post') }}" method="post">
+      <label class="field">
+        <span class="field__label">Email</span>
+        <input name="email" type="email" autocomplete="email" required />
+      </label>
+      <label class="field">
+        <span class="field__label">Password</span>
+        <input name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <button class="btn btn--primary w100" type="submit">Log in</button>
     </form>
-
-    <p class="muted" style="margin-top:12px">
-      Nie masz konta? <a href="{{ url_for('signup') }}">Załóż konto</a>
-    </p>
+    <div class="muted" style="margin-top:12px">
+      Don’t have an account? <a class="link" href="{{ url_for('signup') }}">Create one</a>.
+    </div>
   </div>
 </section>
 {% endblock %}
