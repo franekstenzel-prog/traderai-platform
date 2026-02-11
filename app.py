@@ -318,14 +318,14 @@ def _now_ts() -> int:
 def effective_plan(user_row) -> str:
     """Return the effective plan based on stored plan + Stripe status/grace."""
     plan = (user_row["plan"] or "free")
-    status = (user_row.get("stripe_status") or "").lower().strip()
+    status = (row_get(user_row, "stripe_status") or "").lower().strip()
     # Active / trialing always means Pro.
     if status in ("active", "trialing"):
         return plan if plan in ("pro_monthly", "pro_yearly") else "pro_monthly"
 
     # Grace period: until current period end (stored as unix timestamp) or explicit grace.
-    grace = int(user_row.get("stripe_grace_until") or 0)
-    period_end = int(user_row.get("stripe_current_period_end") or 0)
+    grace = int(row_get(user_row, "stripe_grace_until") or 0)
+    period_end = int(row_get(user_row, "stripe_current_period_end") or 0)
     until = max(grace, period_end)
     if until and until > _now_ts():
         return plan if plan in ("pro_monthly", "pro_yearly") else "pro_monthly"
@@ -2012,3 +2012,18 @@ def billing_portal():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
+def row_get(row, key, default=None):
+    """Safe getter for sqlite3.Row or dict."""
+    try:
+        if row is None:
+            return default
+        # sqlite3.Row: supports keys() + indexing
+        if hasattr(row, "keys") and key in row.keys():
+            return row[key]
+        if isinstance(row, dict):
+            return row.get(key, default)
+    except Exception:
+        pass
+    return default
+
