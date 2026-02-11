@@ -874,7 +874,7 @@ def dashboard():
         app_shell=True,
         user=user,
         user_plan_label=plan_label(eff_plan),
-        user_stripe_status=user.get("stripe_status"),
+        user_stripe_status=row_get(user, "stripe_status"),
         remaining=remaining,
         recent_analyses=recent_analyses,
         recent_trades=recent_trades,
@@ -906,7 +906,7 @@ def analysis_view(analysis_id: int):
         app_shell=True,
         user=user,
         user_plan_label=plan_label(eff_plan),
-        user_stripe_status=user.get("stripe_status"),
+        user_stripe_status=row_get(user, "stripe_status"),
         remaining=remaining,
         row=row,
         result=result,
@@ -944,16 +944,16 @@ def analyze_page():
         app_shell=True,
         user=user,
         user_plan_label=plan_label(eff_plan),
-        user_stripe_status=user.get("stripe_status"),
+        user_stripe_status=row_get(user, "stripe_status"),
         remaining=remaining,
         openai_enabled=bool(OPENAI_API_KEY),
         stripe_enabled=stripe_enabled,
         defaults={
-            "pair": user.get("default_pair") or "BTCUSDT",
-            "timeframe": user.get("default_timeframe") or "1H",
-            "capital": float(user.get("default_capital") or 1000),
-            "risk_fraction": float(user.get("default_risk_fraction") or 0.02),
-            "mode": (user.get("default_mode") or "swing"),
+            "pair": row_get(user, "default_pair") or "BTCUSDT",
+            "timeframe": row_get(user, "default_timeframe") or "1H",
+            "capital": float(row_get(user, "default_capital") or 1000),
+            "risk_fraction": float(row_get(user, "default_risk_fraction") or 0.02),
+            "mode": (row_get(user, "default_mode") or "swing"),
         },
     )
 
@@ -972,7 +972,7 @@ def analyze():
     # Inputs
     pair = (request.form.get("pair") or user["default_pair"] or "BTCUSDT").strip().upper()
     timeframe = (request.form.get("timeframe") or user["default_timeframe"] or "1H").strip().upper()
-    mode = (request.form.get("mode") or user.get("default_mode") or "swing").strip().lower()
+    mode = (request.form.get("mode") or row_get(user, "default_mode") or "swing").strip().lower()
 
     def _f(name: str, default: float) -> float:
         try:
@@ -1071,7 +1071,7 @@ def _app_shell_context(user: sqlite3.Row) -> dict:
         "app_shell": True,
         "user": user,
         "user_plan_label": plan_label(eff_plan),
-        "user_stripe_status": user.get("stripe_status"),
+        "user_stripe_status": row_get(user, "stripe_status"),
         "remaining": remaining,
         "stripe_enabled": _stripe_ready(),
     }
@@ -1223,8 +1223,8 @@ def journal():
     db = get_db()
 
     if request.method == "POST":
-        symbol = (request.form.get("symbol") or user.get("default_pair") or "BTCUSDT").strip().upper()
-        mode = (request.form.get("mode") or user.get("default_mode") or "swing").strip().lower()
+        symbol = (request.form.get("symbol") or row_get(user, "default_pair") or "BTCUSDT").strip().upper()
+        mode = (request.form.get("mode") or row_get(user, "default_mode") or "swing").strip().lower()
         if mode not in ("scalp", "swing"):
             mode = "swing"
         side = (request.form.get("side") or "LONG").strip().upper()
@@ -1234,8 +1234,8 @@ def journal():
         entry = _parse_float(request.form.get("entry"))
         stop = _parse_float(request.form.get("stop"))
         exit_price = _parse_float(request.form.get("exit"))
-        capital = _parse_float(request.form.get("capital"), float(user.get("default_capital") or 1000)) or 0.0
-        risk_fraction = _parse_float(request.form.get("risk_fraction"), float(user.get("default_risk_fraction") or 0.02)) or 0.0
+        capital = _parse_float(request.form.get("capital"), float(row_get(user, "default_capital") or 1000)) or 0.0
+        risk_fraction = _parse_float(request.form.get("risk_fraction"), float(row_get(user, "default_risk_fraction") or 0.02)) or 0.0
         notes = (request.form.get("notes") or "").strip()
 
         r_multiple = None
@@ -1290,10 +1290,10 @@ def journal():
         trades=trades,
         perf=perf,
         defaults={
-            "symbol": user.get("default_pair") or "BTCUSDT",
-            "mode": (user.get("default_mode") or "swing"),
-            "capital": float(user.get("default_capital") or 1000),
-            "risk_fraction": float(user.get("default_risk_fraction") or 0.02),
+            "symbol": row_get(user, "default_pair") or "BTCUSDT",
+            "mode": (row_get(user, "default_mode") or "swing"),
+            "capital": float(row_get(user, "default_capital") or 1000),
+            "risk_fraction": float(row_get(user, "default_risk_fraction") or 0.02),
         },
     )
 
@@ -1522,8 +1522,8 @@ def calculator():
     user = ctx["user"]
 
     defaults = {
-        "capital": float(user.get("default_capital") or 1000),
-        "risk_pct": round(float(user.get("default_risk_fraction") or 0.02) * 100.0, 2),
+        "capital": float(row_get(user, "default_capital") or 1000),
+        "risk_pct": round(float(row_get(user, "default_risk_fraction") or 0.02) * 100.0, 2),
         "entry": "",
         "stop": "",
         "tp": "",
@@ -1584,9 +1584,9 @@ def account():
         if action == "update_defaults":
             default_pair = (request.form.get("default_pair") or "").strip().upper() or "BTCUSDT"
             default_timeframe = (request.form.get("default_timeframe") or "").strip().upper() or "1H"
-            default_capital = _parse_float(request.form.get("default_capital"), float(user.get("default_capital") or 1000)) or 1000.0
-            default_risk_fraction = _parse_float(request.form.get("default_risk_fraction"), float(user.get("default_risk_fraction") or 0.02)) or 0.02
-            default_mode = (request.form.get("default_mode") or user.get("default_mode") or "swing").strip().lower()
+            default_capital = _parse_float(request.form.get("default_capital"), float(row_get(user, "default_capital") or 1000)) or 1000.0
+            default_risk_fraction = _parse_float(request.form.get("default_risk_fraction"), float(row_get(user, "default_risk_fraction") or 0.02)) or 0.02
+            default_mode = (request.form.get("default_mode") or row_get(user, "default_mode") or "swing").strip().lower()
             if default_mode not in ("scalp", "swing"):
                 default_mode = "swing"
 
@@ -1756,7 +1756,7 @@ def _apply_subscription_to_user(db: sqlite3.Connection, user_id: int, sub: dict 
 
 
 def _get_or_create_customer(db: sqlite3.Connection, user: sqlite3.Row) -> str:
-    customer_id = user.get("stripe_customer_id")
+    customer_id = row_get(user, "stripe_customer_id")
     if customer_id:
         return customer_id
 
@@ -1774,12 +1774,12 @@ def _sync_user_from_stripe(user_id: int) -> None:
 
     db = get_db()
     user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    if not user or not user.get("stripe_customer_id"):
+    if not user or not row_get(user, "stripe_customer_id"):
         return
 
     sub = None
     try:
-        if user.get("stripe_subscription_id"):
+        if row_get(user, "stripe_subscription_id"):
             sub = stripe.Subscription.retrieve(user["stripe_subscription_id"])
         else:
             subs = stripe.Subscription.list(customer=user["stripe_customer_id"], status="all", limit=10)
@@ -1807,7 +1807,7 @@ def billing():
     ctx = _app_shell_context(user)
     user = ctx["user"]
 
-    period_end_ts = int(user.get("stripe_current_period_end") or 0)
+    period_end_ts = int(row_get(user, "stripe_current_period_end") or 0)
     period_end = None
     if period_end_ts:
         period_end = datetime.fromtimestamp(period_end_ts, tz=timezone.utc).strftime("%Y-%m-%d")
@@ -1816,7 +1816,7 @@ def billing():
         "billing.html",
         **ctx,
         period_end=period_end,
-        cancel_at_period_end=bool(user.get("stripe_cancel_at_period_end")),
+        cancel_at_period_end=bool(row_get(user, "stripe_cancel_at_period_end")),
     )
 
 
@@ -1828,7 +1828,7 @@ def billing_sync():
         return redirect(url_for("billing"))
 
     user = current_user()
-    if not user.get("stripe_customer_id"):
+    if not row_get(user, "stripe_customer_id"):
         flash("No Stripe customer found for this account.", "error")
         return redirect(url_for("billing"))
 
@@ -1845,7 +1845,7 @@ def billing_cancel():
         return redirect(url_for("billing"))
 
     user = current_user()
-    if not user.get("stripe_subscription_id"):
+    if not row_get(user, "stripe_subscription_id"):
         flash("No active subscription found.", "error")
         return redirect(url_for("billing"))
 
@@ -1868,7 +1868,7 @@ def billing_resume():
         return redirect(url_for("billing"))
 
     user = current_user()
-    if not user.get("stripe_subscription_id"):
+    if not row_get(user, "stripe_subscription_id"):
         flash("No subscription found.", "error")
         return redirect(url_for("billing"))
 
@@ -1981,7 +1981,7 @@ def stripe_webhook():
             u = db.execute("SELECT * FROM users WHERE stripe_customer_id = ?", (customer_id,)).fetchone()
         if u:
             try:
-                sub_id = obj.get("subscription") or u.get("stripe_subscription_id")
+                sub_id = obj.get("subscription") or row_get(u, "stripe_subscription_id")
                 if sub_id:
                     sub = stripe.Subscription.retrieve(sub_id)
                     _apply_subscription_to_user(db, u["id"], sub)
@@ -1998,7 +1998,7 @@ def billing_portal():
         flash("Stripe is not configured on this deployment.", "error")
         return redirect(url_for("billing"))
     user = current_user()
-    if not user.get("stripe_customer_id"):
+    if not row_get(user, "stripe_customer_id"):
         flash("No Stripe customer found for this account.", "error")
         return redirect(url_for("billing"))
 
@@ -2022,8 +2022,9 @@ def row_get(row, key, default=None):
         if hasattr(row, "keys") and key in row.keys():
             return row[key]
         if isinstance(row, dict):
-            return row.get(key, default)
+            return row_get(row, key, default)
     except Exception:
         pass
     return default
+
 
