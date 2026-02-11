@@ -52,7 +52,26 @@
         </label>
       </div>
 
-      <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
+      <details class="card" style="margin-top:12px;padding:12px">
+        <summary class="muted" style="cursor:pointer">Advanced: costs (spread / fees / slippage)</summary>
+        <div class="grid3" style="margin-top:10px">
+          <label class="field">
+            <span class="field__label">Spread (bps)</span>
+            <input name="spread_bps" value="{{ user['default_spread_bps'] or 5 }}" inputmode="decimal" />
+            <span class="field__hint muted">5 bps = 0.05%</span>
+          </label>
+          <label class="field">
+            <span class="field__label">Fees round-trip (bps)</span>
+            <input name="fee_bps" value="{{ user['default_fee_bps'] or 4 }}" inputmode="decimal" />
+          </label>
+          <label class="field">
+            <span class="field__label">Slippage round-trip (bps)</span>
+            <input name="slippage_bps" value="{{ user['default_slippage_bps'] or 2 }}" inputmode="decimal" />
+          </label>
+        </div>
+      </details>
+
+
         <button class="btn btn--primary" type="submit" {% if not openai_enabled %}disabled{% endif %}>Analyze</button>
         <div class="muted small">Free limit: {{ FREE_MONTHLY_LIMIT }}/month. News context is fetched automatically (best effort).</div>
       </div>
@@ -73,3 +92,4 @@
     </div>
   {% endif %}
 {% endblock %}
+

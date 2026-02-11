@@ -109,6 +109,9 @@ def _ensure_columns(db: sqlite3.Connection) -> None:
         "default_capital": "REAL",
         "default_risk_fraction": "REAL",
         "default_mode": "TEXT",
+        "default_spread_bps": "REAL",
+        "default_fee_bps": "REAL",
+        "default_slippage_bps": "REAL",
     }
     for col, coltype in needed.items():
         if not _column_exists(db, "users", col):
@@ -982,7 +985,7 @@ def analyze():
 
     capital = _f("capital", float(user["default_capital"] or 1000))
     risk_fraction = _f("risk_fraction", float(user["default_risk_fraction"] or 0.02))
-
+    spread_bps = _f("spread_bps", float(user.get("default_spread_bps") or _default_spread_bps_for_pair(pair)))`n    fee_bps = _f("fee_bps", float(user.get("default_fee_bps") or 4.0))`n    slippage_bps = _f("slippage_bps", float(user.get("default_slippage_bps") or 2.0))`n
     # Auto news (best-effort) — do not ask the user for it.
     news_context = auto_news_context(pair=pair, timeframe=timeframe)
 
@@ -2027,4 +2030,41 @@ def row_get(row, key, default=None):
         pass
     return default
 
+
+
+def _default_spread_bps_for_pair(pair: str) -> float:
+    p = (pair or "").upper()
+    if (p.endswith("USDT") or p.endswith("USDC")) and any(x in p for x in ("BTC", "ETH")):
+        return 2.0
+    if p.endswith("USDT") or p.endswith("USDC"):
+        return 5.0
+    return 10.0
+
+def _effective_costs_price(entry: float, spread_bps: float, fee_bps: float, slippage_bps: float) -> dict:
+    spread = abs(entry) * (spread_bps / 10000.0)
+    fees = abs(entry) * (fee_bps / 10000.0) * 2.0
+    slippage = abs(entry) * (slippage_bps / 10000.0) * 2.0
+    return {"spread": spread, "fees": fees, "slippage": slippage, "total": spread + fees + slippage}
+
+def _compute_position_size_units(capital: float, risk_fraction: float, entry: float, sl: float,
+                                 spread_bps: float, fee_bps: float, slippage_bps: float) -> dict:
+    risk_amount = max(0.0, float(capital) * float(risk_fraction))
+    stop_dist = abs(float(entry) - float(sl))
+    costs = _effective_costs_price(float(entry), spread_bps, fee_bps, slippage_bps)
+    eff_risk_per_unit = stop_dist + costs["total"]
+    if eff_risk_per_unit <= 0:
+        return {"units": None, "notional": None, "risk_amount": risk_amount, "eff_risk_per_unit": eff_risk_per_unit, "costs": costs}
+    units = risk_amount / eff_risk_per_unit
+    notional = units * float(entry)
+    return {"units": units, "notional": notional, "risk_amount": risk_amount, "eff_risk_per_unit": eff_risk_per_unit, "costs": costs}
+
+def _compute_net_rr(entry: float, sl: float, tp: float, spread_bps: float, fee_bps: float, slippage_bps: float):
+    r = abs(float(entry) - float(sl))
+    reward = abs(float(tp) - float(entry))
+    costs_total = _effective_costs_price(float(entry), spread_bps, fee_bps, slippage_bps)["total"]
+    eff_r = r + costs_total
+    eff_reward = reward - costs_total
+    if eff_r <= 0 or eff_reward <= 0:
+        return None
+    return eff_reward / eff_r
 
