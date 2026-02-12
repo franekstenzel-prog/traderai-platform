@@ -540,6 +540,8 @@ def auto_news_context(pair: str, timeframe: str = "") -> str:
 # OpenAI: chart analysis (v2.6 PRO, English output)
 # -----------------------------
 def analyze_with_openai_pro(image_bytes, pair, timeframe, mode, capital, risk_fraction, spread_bps=None, fee_bps=None, slippage_bps=None, **_ignored):
+    # Ensure image MIME is defined (used by OpenAI image input)
+    image_mime = _guess_image_mime(locals().get("image_filename") or locals().get("filename") or None, "image/png")
     """English, concise instruction set with permissive NO_TRADE."""
 
     if not OPENAI_API_KEY:
@@ -2113,5 +2115,18 @@ def _compute_net_rr(entry: float, sl: float, tp: float, spread_bps: float, fee_b
     return eff_reward / eff_r
 
 
+
+
+
+def _guess_image_mime(filename: str | None, fallback: str = "image/png") -> str:
+    try:
+        fn = (filename or "").lower().strip()
+        if fn.endswith(".png"):  return "image/png"
+        if fn.endswith(".jpg") or fn.endswith(".jpeg"): return "image/jpeg"
+        if fn.endswith(".webp"): return "image/webp"
+        # czasem wykresy są w .gif, ale raczej nie – zostaw fallback
+        return fallback
+    except Exception:
+        return fallback
 
 
