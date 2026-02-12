@@ -722,6 +722,29 @@ Output rules:
         tps = []
     tp0_n = _first_number(tps[0]) if tps else None
 
+    # Deterministic position sizing + net RR check (best-effort)
+    if sig in ("LONG", "SHORT") and entry_n is not None and sl_n is not None:
+        sizing = _compute_position_size_units(capital, risk_fraction, entry_n, sl_n,
+                                             float(spread_bps), float(fee_bps), float(slippage_bps))
+        if sizing.get("units") is not None:
+            units = float(sizing["units"])
+            notional = float(sizing["notional"])
+            result["position_size"] = "{:.6f} units (~{:.2f} notional)".format(units, notional)
+            c = sizing.get("costs") or {}
+            result["risk"] = "Risk ${:.2f}; eff stop {:.6f} (spread {:.6f}, fees {:.6f}, slip {:.6f})".format(
+                float(sizing["risk_amount"]),
+                float(sizing["eff_risk_per_unit"]),
+                float(c.get("spread", 0.0)),
+                float(c.get("fees", 0.0)),
+                float(c.get("slippage", 0.0)),
+            )
+
+        if tp0_n is not None:
+            rr = _compute_net_rr(entry_n, sl_n, tp0_n, float(spread_bps), float(fee_bps), float(slippage_bps))
+            min_rr = 1.2 if mode_norm == "scalp" else 1.5
+            if rr is None or rr < min_rr:
+                _force_no_trade("NO_TRADE: net RR too low after costs (rr={}, min={}).".format(rr, min_rr))
+                return result
     if sig == "LONG" and entry_n is not None and sl_n is not None:
         if sl_n >= entry_n:
             _force_no_trade("NO_TRADE: inconsistent levels (for LONG, SL must be below entry).")
@@ -985,7 +1008,7 @@ def analyze():
 
     capital = _f("capital", float(user["default_capital"] or 1000))
     risk_fraction = _f("risk_fraction", float(user["default_risk_fraction"] or 0.02))
-    spread_bps = _f("spread_bps", float(user.get("default_spread_bps") or _default_spread_bps_for_pair(pair)))`n    fee_bps = _f("fee_bps", float(user.get("default_fee_bps") or 4.0))`n    slippage_bps = _f("slippage_bps", float(user.get("default_slippage_bps") or 2.0))`n
+    spread_bps = _f("spread_bps", float(row_get(user, "default_spread_bps") or _default_spread_bps_for_pair(pair)))`n    fee_bps = _f("fee_bps", float(row_get(user, "default_fee_bps") or 4.0))`n    slippage_bps = _f("slippage_bps", float(row_get(user, "default_slippage_bps") or 2.0))`n
     # Auto news (best-effort) — do not ask the user for it.
     news_context = auto_news_context(pair=pair, timeframe=timeframe)
 
@@ -2067,4 +2090,5 @@ def _compute_net_rr(entry: float, sl: float, tp: float, spread_bps: float, fee_b
     if eff_r <= 0 or eff_reward <= 0:
         return None
     return eff_reward / eff_r
+
 
