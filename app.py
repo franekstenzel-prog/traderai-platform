@@ -618,29 +618,55 @@ def analyze_with_openai_pro(
     }
 
     instruction = f"""
-You are a professional trading analyst.
+You are a professional discretionary trading assistant. Use a STRICT Support/Resistance-first approach.
 
-Task:
-1) First decide whether the image contains a readable price chart screenshot. Set is_chart=false if it is NOT a chart, or if prices/timeframe are not readable.
-2) If is_chart=true, return one of: LONG, SHORT, or NO_TRADE.
-   - Use NO_TRADE if there is no clear edge, if structure is messy, or if risk is not definable.
-   - Never invent indicators or numbers not visible on the screenshot.
+RULES (must follow):
+1) First decide if the screenshot is a REAL, readable trading chart (candles + price axis). 
+   If not readable / unclear / too zoomed out / missing price axis -> is_chart=false and signal=NO_TRADE.
+2) Identify KEY SUPPORT & RESISTANCE levels/zones (horizontal zones + trendlines + channels).
+   Prefer levels with 2–3+ reactions (bounces/rejections), and obvious swing highs/lows.
+3) Only trade when CURRENT PRICE is CLOSE to a key level:
+   - BTC/ETH vs USDT/USDC: within ~0.15% of a level
+   - other crypto pairs: within ~0.25% of a level
+   If price is mid-range (not near a level) -> signal=NO_TRADE.
+4) Entry logic:
+   - LONG: only near SUPPORT (or support retest after a bounce). 
+           SL must be BELOW the support zone (and below the nearest swing low/liquidity).
+           TP targets = nearest resistance zone(s).
+   - SHORT: only near RESISTANCE (or resistance retest after rejection). 
+            SL must be ABOVE the resistance zone (and above the nearest swing high/liquidity).
+            TP targets = nearest support zone(s).
+5) Candlestick patterns are SECONDARY confirmation only (never the primary reason):
+   - bullish/bearish engulfing
+   - pin bar / hammer / shooting star
+   - morning star / evening star
+   - inside bar breakout
+   - doji + rejection at level
+   If no clear confirmation at the level -> prefer NO_TRADE.
+6) If anything is ambiguous -> NO_TRADE. This is mandatory.
+
+Return STRICT JSON ONLY (no markdown, no commentary), schema:
+
+{{
+  "is_chart": true/false,
+  "signal": "LONG" | "SHORT" | "NO_TRADE",
+  "entry": number|null,
+  "stop_loss": number|null,
+  "take_profit": [number, ...],
+  "position_size": "AUTO",
+  "confidence": 0-100,
+  "setup": "1-2 sentences summary",
+  "confluence": ["bullet", ...],
+  "invalidations": ["bullet", ...]
+}}
 
 Context:
-- Pair: {pair}
-- Timeframe: {timeframe}
-- Mode: {mode_norm.upper()} (SCALP = tighter SL/TP, quicker invalidation; SWING = wider structure-based levels)
-- Capital: {capital}
-- Risk per trade: {risk_fraction} (fraction of capital, e.g. 0.02 = 2%)
+pair={pair}
+timeframe={timeframe}
+mode={mode_norm.upper()}
+capital={capital}
+risk_fraction={risk_fraction}
 
-News (best-effort, may be empty):
-{news_context or ""}
-
-Output rules:
-- Return ONLY JSON matching the schema (no markdown).
-- If signal=NO_TRADE, set entry=null, stop_loss=null, position_size=null, take_profit=[] and explain clearly why.
-- If LONG/SHORT, provide concrete entry/SL/TP levels (numbers or tight ranges) and a clear invalidation.
-- Provide 6–12 short bullet points in rationale (structure, levels, liquidity/price action, and the biggest risk).
 """
 
     resp = client.responses.create(
@@ -1008,7 +1034,9 @@ def analyze():
 
     capital = _f("capital", float(user["default_capital"] or 1000))
     risk_fraction = _f("risk_fraction", float(user["default_risk_fraction"] or 0.02))
-    spread_bps = _f("spread_bps", float(row_get(user, "default_spread_bps") or _default_spread_bps_for_pair(pair)))`n    fee_bps = _f("fee_bps", float(row_get(user, "default_fee_bps") or 4.0))`n    slippage_bps = _f("slippage_bps", float(row_get(user, "default_slippage_bps") or 2.0))`n
+    spread_bps = _f("spread_bps", float(row_get(user, "default_spread_bps") or _default_spread_bps_for_pair(pair)))
+    fee_bps = _f("fee_bps", float(row_get(user, "default_fee_bps") or 4.0))
+    slippage_bps = _f("slippage_bps", float(row_get(user, "default_slippage_bps") or 2.0))
     # Auto news (best-effort) — do not ask the user for it.
     news_context = auto_news_context(pair=pair, timeframe=timeframe)
 
@@ -1038,7 +1066,9 @@ def analyze():
             timeframe=timeframe,
             capital=capital,
             risk_fraction=risk_fraction,
-            mode=mode,
+            spread_bps=spread_bps,
+            fee_bps=fee_bps,
+            slippage_bps=slippage_bps,mode=mode,
             news_context=news_context,
         )
     except Exception as e:
@@ -2090,5 +2120,6 @@ def _compute_net_rr(entry: float, sl: float, tp: float, spread_bps: float, fee_b
     if eff_r <= 0 or eff_reward <= 0:
         return None
     return eff_reward / eff_r
+
 
 
