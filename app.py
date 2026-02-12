@@ -539,16 +539,7 @@ def auto_news_context(pair: str, timeframe: str = "") -> str:
 # -----------------------------
 # OpenAI: chart analysis (v2.6 PRO, English output)
 # -----------------------------
-def analyze_with_openai_pro(
-    image_bytes: bytes,
-    image_mime: str,
-    pair: str,
-    timeframe: str,
-    capital: float,
-    risk_fraction: float,
-    mode: str,
-    news_context: str = "",
-) -> dict:
+def analyze_with_openai_pro(image_bytes, pair, timeframe, mode, capital, risk_fraction, spread_bps=None, fee_bps=None, slippage_bps=None, **_ignored):
     """English, concise instruction set with permissive NO_TRADE."""
 
     if not OPENAI_API_KEY:
@@ -2120,6 +2111,7 @@ def _compute_net_rr(entry: float, sl: float, tp: float, spread_bps: float, fee_b
     if eff_r <= 0 or eff_reward <= 0:
         return None
     return eff_reward / eff_r
+
 
 
 
