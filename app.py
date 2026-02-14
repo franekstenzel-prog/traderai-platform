@@ -549,12 +549,12 @@ def analyze_with_openai_pro(image_bytes, pair, timeframe, mode, capital, risk_fr
         raise RuntimeError("Missing OPENAI_API_KEY environment variable.")
 
     from openai import OpenAI  # lazy import
-client = OpenAI(
+    client = OpenAI(
     api_key=OPENAI_API_KEY,
     http_client=httpx.Client(
         timeout=httpx.Timeout(60.0, connect=15.0, read=60.0, write=15.0),
     ),
-)
+    )
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
     image_url = f"data:{image_mime};base64,{base64_image}"
 
@@ -616,36 +616,36 @@ client = OpenAI(
     }
 
     instruction = f"""
-You are a professional discretionary trading assistant. Use a STRICT Support/Resistance-first approach.
+    You are a professional discretionary trading assistant. Use a STRICT Support/Resistance-first approach.
 
-RULES (must follow):
-1) First decide if the screenshot is a REAL, readable trading chart (candles + price axis). 
+    RULES (must follow):
+    1) First decide if the screenshot is a REAL, readable trading chart (candles + price axis). 
    If not readable / unclear / too zoomed out / missing price axis -> is_chart=false and signal=NO_TRADE.
-2) Identify KEY SUPPORT & RESISTANCE levels/zones (horizontal zones + trendlines + channels).
+    2) Identify KEY SUPPORT & RESISTANCE levels/zones (horizontal zones + trendlines + channels).
    Prefer levels with 2–3+ reactions (bounces/rejections), and obvious swing highs/lows.
-3) Only trade when CURRENT PRICE is CLOSE to a key level:
+    3) Only trade when CURRENT PRICE is CLOSE to a key level:
    - BTC/ETH vs USDT/USDC: within ~0.15% of a level
    - other crypto pairs: within ~0.25% of a level
    If price is mid-range (not near a level) -> signal=NO_TRADE.
-4) Entry logic:
+    4) Entry logic:
    - LONG: only near SUPPORT (or support retest after a bounce). 
            SL must be BELOW the support zone (and below the nearest swing low/liquidity).
            TP targets = nearest resistance zone(s).
    - SHORT: only near RESISTANCE (or resistance retest after rejection). 
             SL must be ABOVE the resistance zone (and above the nearest swing high/liquidity).
             TP targets = nearest support zone(s).
-5) Candlestick patterns are SECONDARY confirmation only (never the primary reason):
+    5) Candlestick patterns are SECONDARY confirmation only (never the primary reason):
    - bullish/bearish engulfing
    - pin bar / hammer / shooting star
    - morning star / evening star
    - inside bar breakout
    - doji + rejection at level
    If no clear confirmation at the level -> prefer NO_TRADE.
-6) If anything is ambiguous -> NO_TRADE. This is mandatory.
+    6) If anything is ambiguous -> NO_TRADE. This is mandatory.
 
-Return STRICT JSON ONLY (no markdown, no commentary), schema:
+    Return STRICT JSON ONLY (no markdown, no commentary), schema:
 
-{{
+    {{
   "is_chart": true/false,
   "signal": "LONG" | "SHORT" | "NO_TRADE",
   "entry": number|null,
@@ -656,16 +656,16 @@ Return STRICT JSON ONLY (no markdown, no commentary), schema:
   "setup": "1-2 sentences summary",
   "confluence": ["bullet", ...],
   "invalidations": ["bullet", ...]
-}}
+    }}
 
-Context:
-pair={pair}
-timeframe={timeframe}
-mode={mode_norm.upper()}
-capital={capital}
-risk_fraction={risk_fraction}
+    Context:
+    pair={pair}
+    timeframe={timeframe}
+    mode={mode_norm.upper()}
+    capital={capital}
+    risk_fraction={risk_fraction}
 
-"""
+    """
 
     resp = client.responses.create(
         model=OPENAI_MODEL,
@@ -691,7 +691,7 @@ risk_fraction={risk_fraction}
     result = json.loads(out)
 
     # Post-validation (keep it safe + consistent)
-    def _first_number(val: object) -> Optional[float]:
+def _first_number(val: object) -> Optional[float]:
         if val is None:
             return None
         s = str(val)
