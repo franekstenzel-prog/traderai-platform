@@ -549,11 +549,13 @@ def analyze_with_openai_pro(image_bytes, pair, timeframe, mode, capital, risk_fr
         raise RuntimeError("Missing OPENAI_API_KEY environment variable.")
 
     from openai import OpenAI  # lazy import
+    import httpx
+
     client = OpenAI(
-    api_key=OPENAI_API_KEY,
-    http_client=httpx.Client(
-        timeout=httpx.Timeout(60.0, connect=15.0, read=60.0, write=15.0),
-    ),
+        api_key=OPENAI_API_KEY,
+        http_client=httpx.Client(
+            timeout=httpx.Timeout(60.0, connect=15.0, read=60.0, write=15.0),
+        ),
     )
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
     image_url = f"data:{image_mime};base64,{base64_image}"
@@ -616,36 +618,36 @@ def analyze_with_openai_pro(image_bytes, pair, timeframe, mode, capital, risk_fr
     }
 
     instruction = f"""
-    You are a professional discretionary trading assistant. Use a STRICT Support/Resistance-first approach.
+You are a professional intraday trader. Use a PROBABILISTIC approach: S/R + momentum + structure. Prefer LONG/SHORT over NO_TRADE; use NO_TRADE only if chart is unreadable or extremely choppy.
 
-    RULES (must follow):
-    1) First decide if the screenshot is a REAL, readable trading chart (candles + price axis). 
+RULES (must follow):
+1) First decide if the screenshot is a REAL, readable trading chart (candles + price axis). 
    If not readable / unclear / too zoomed out / missing price axis -> is_chart=false and signal=NO_TRADE.
-    2) Identify KEY SUPPORT & RESISTANCE levels/zones (horizontal zones + trendlines + channels).
+2) Identify KEY SUPPORT & RESISTANCE levels/zones (horizontal zones + trendlines + channels).
    Prefer levels with 2–3+ reactions (bounces/rejections), and obvious swing highs/lows.
-    3) Only trade when CURRENT PRICE is CLOSE to a key level:
+3) Only trade when CURRENT PRICE is CLOSE to a key level:
    - BTC/ETH vs USDT/USDC: within ~0.15% of a level
    - other crypto pairs: within ~0.25% of a level
-   If price is mid-range (not near a level) -> signal=NO_TRADE.
-    4) Entry logic:
+   If price is mid-range, still pick LONG or SHORT based on momentum/structure; use NO_TRADE only if momentum is flat/choppy.
+4) Entry logic:
    - LONG: only near SUPPORT (or support retest after a bounce). 
            SL must be BELOW the support zone (and below the nearest swing low/liquidity).
            TP targets = nearest resistance zone(s).
    - SHORT: only near RESISTANCE (or resistance retest after rejection). 
             SL must be ABOVE the resistance zone (and above the nearest swing high/liquidity).
             TP targets = nearest support zone(s).
-    5) Candlestick patterns are SECONDARY confirmation only (never the primary reason):
+5) Candlestick patterns are SECONDARY confirmation only (never the primary reason):
    - bullish/bearish engulfing
    - pin bar / hammer / shooting star
    - morning star / evening star
    - inside bar breakout
    - doji + rejection at level
    If no clear confirmation at the level -> prefer NO_TRADE.
-    6) If anything is ambiguous -> NO_TRADE. This is mandatory.
+6) If anything is ambiguous -> NO_TRADE. This is mandatory.
 
-    Return STRICT JSON ONLY (no markdown, no commentary), schema:
+Return STRICT JSON ONLY (no markdown, no commentary), schema:
 
-    {{
+{{
   "is_chart": true/false,
   "signal": "LONG" | "SHORT" | "NO_TRADE",
   "entry": number|null,
@@ -656,16 +658,16 @@ def analyze_with_openai_pro(image_bytes, pair, timeframe, mode, capital, risk_fr
   "setup": "1-2 sentences summary",
   "confluence": ["bullet", ...],
   "invalidations": ["bullet", ...]
-    }}
+}}
 
-    Context:
-    pair={pair}
-    timeframe={timeframe}
-    mode={mode_norm.upper()}
-    capital={capital}
-    risk_fraction={risk_fraction}
+Context:
+pair={pair}
+timeframe={timeframe}
+mode={mode_norm.upper()}
+capital={capital}
+risk_fraction={risk_fraction}
 
-    """
+"""
 
     resp = client.responses.create(
         model=OPENAI_MODEL,
@@ -691,6 +693,113 @@ def analyze_with_openai_pro(image_bytes, pair, timeframe, mode, capital, risk_fr
     result = json.loads(out)
 
     # Post-validation (keep it safe + consistent)
+    def _first_number(val: object) -> Optional[float]:
+        if val is None:
+            return None
+        s = str(val)
+        m = re.search(r"[-+]?\d+(?:[\.,]\d+)?", s)
+        if not m:
+            return None
+        try:
+            return float(m.group(0).replace(",", "."))
+        except Exception:
+            return None
+
+    def _force_no_trade(reason: str, max_conf: int = 55):
+        result["signal"] = "NO_TRADE"
+        result["setup"] = reason
+        result["confidence"] = min(int(result.get("confidence") or 0), max_conf)
+        result["entry"] = None
+        result["stop_loss"] = None
+        result["position_size"] = None
+        result["take_profit"] = []
+
+    if not bool(result.get("is_chart")):
+        _force_no_trade("NO_TRADE: not a readable price chart screenshot.", max_conf=25)
+        return result
+
+    sig = str(result.get("signal") or "NO_TRADE").upper()
+    if sig not in ("LONG", "SHORT", "NO_TRADE"):
+        _force_no_trade("NO_TRADE: invalid signal.")
+        return result
+    result["signal"] = sig
+
+    # Normalize mode field
+    result["mode"] = "SCALP" if mode_norm == "scalp" else "SWING"
+
+    if sig == "NO_TRADE":
+        result["entry"] = None
+        result["stop_loss"] = None
+        result["position_size"] = None
+        result["take_profit"] = []
+        if not isinstance(result.get("rationale"), list):
+            result["rationale"] = [str(result.get("rationale") or "")]
+        return result
+
+    # Must have entry + SL
+    if result.get("entry") is None or result.get("stop_loss") is None:
+        _force_no_trade("NO_TRADE: missing entry or stop-loss.")
+        return result
+
+    entry_n = _first_number(result.get("entry"))
+    sl_n = _first_number(result.get("stop_loss"))
+    tps = result.get("take_profit") or []
+    if not isinstance(tps, list):
+        tps = []
+    tp0_n = _first_number(tps[0]) if tps else None
+
+    # Deterministic position sizing + net RR check (best-effort)
+    if sig in ("LONG", "SHORT") and entry_n is not None and sl_n is not None:
+        sizing = _compute_position_size_units(capital, risk_fraction, entry_n, sl_n,
+                                             float(spread_bps), float(fee_bps), float(slippage_bps))
+        if sizing.get("units") is not None:
+            units = float(sizing["units"])
+            notional = float(sizing["notional"])
+            result["position_size"] = "{:.6f} units (~{:.2f} notional)".format(units, notional)
+            c = sizing.get("costs") or {}
+            result["risk"] = "Risk ${:.2f}; eff stop {:.6f} (spread {:.6f}, fees {:.6f}, slip {:.6f})".format(
+                float(sizing["risk_amount"]),
+                float(sizing["eff_risk_per_unit"]),
+                float(c.get("spread", 0.0)),
+                float(c.get("fees", 0.0)),
+                float(c.get("slippage", 0.0)),
+            )
+
+        if tp0_n is not None:
+            rr = _compute_net_rr(entry_n, sl_n, tp0_n, float(spread_bps), float(fee_bps), float(slippage_bps))
+            min_rr = 1.2 if mode_norm == "scalp" else 1.5
+            if rr is None or rr < min_rr:
+                _force_no_trade("NO_TRADE: net RR too low after costs (rr={}, min={}).".format(rr, min_rr))
+                return result
+    if sig == "LONG" and entry_n is not None and sl_n is not None:
+        if sl_n >= entry_n:
+            _force_no_trade("NO_TRADE: inconsistent levels (for LONG, SL must be below entry).")
+            return result
+        if tp0_n is not None and tp0_n <= entry_n:
+            _force_no_trade("NO_TRADE: inconsistent levels (for LONG, TP must be above entry).")
+            return result
+    if sig == "SHORT" and entry_n is not None and sl_n is not None:
+        if sl_n <= entry_n:
+            _force_no_trade("NO_TRADE: inconsistent levels (for SHORT, SL must be above entry).")
+            return result
+        if tp0_n is not None and tp0_n >= entry_n:
+            _force_no_trade("NO_TRADE: inconsistent levels (for SHORT, TP must be below entry).")
+            return result
+
+    # Ensure lists
+    if not isinstance(result.get("issues"), list):
+        result["issues"] = [str(result.get("issues") or "")]
+    if not isinstance(result.get("rationale"), list):
+        result["rationale"] = [str(result.get("rationale") or "")]
+    result["take_profit"] = [str(x) for x in (result.get("take_profit") or []) if str(x).strip()]
+
+    return result
+
+
+# -----------------------------
+# Routes
+# -----------------------------
+@app.before_request
 def _first_number(val: object) -> Optional[float]:
         if val is None:
             return None
