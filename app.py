@@ -75,10 +75,15 @@ if STRIPE_SECRET_KEY:
 # -----------------------------
 # DB helpers
 # -----------------------------
+def dict_factory(cursor, row):
+    """Return sqlite rows as plain dicts (so .get works everywhere)."""
+    return {col[0]: row[idx] for idx, col in enumerate(cursor.description)}
+
+
 def get_db() -> sqlite3.Connection:
     if "db" not in g:
         conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
+        conn.row_factory = dict_factory
         g.db = conn
     return g.db
 
@@ -303,16 +308,6 @@ def monthly_limit_for_plan(plan: str):
     return FREE_MONTHLY_LIMIT
 
 
-
-
-def row_get(row, key, default=None):
-    """Safe getter for sqlite3.Row / dict-like rows (sqlite3.Row has no .get)."""
-    try:
-        return row[key]
-    except Exception:
-        return default
-
-
 def can_analyze(user_row) -> bool:
     plan = effective_plan(user_row)
     limit = monthly_limit_for_plan(plan)
@@ -328,14 +323,14 @@ def _now_ts() -> int:
 def effective_plan(user_row) -> str:
     """Return the effective plan based on stored plan + Stripe status/grace."""
     plan = (user_row["plan"] or "free")
-    status = (row_get(user_row, "stripe_status") or "").lower().strip()
+    status = (user_row.get("stripe_status") or "").lower().strip()
     # Active / trialing always means Pro.
     if status in ("active", "trialing"):
         return plan if plan in ("pro_monthly", "pro_yearly") else "pro_monthly"
 
     # Grace period: until current period end (stored as unix timestamp) or explicit grace.
-    grace = int(row_get(user_row, "stripe_grace_until") or 0)
-    period_end = int(row_get(user_row, "stripe_current_period_end") or 0)
+    grace = int(user_row.get("stripe_grace_until") or 0)
+    period_end = int(user_row.get("stripe_current_period_end") or 0)
     until = max(grace, period_end)
     if until and until > _now_ts():
         return plan if plan in ("pro_monthly", "pro_yearly") else "pro_monthly"
