@@ -1,3 +1,4 @@
+import httpx
 from __future__ import annotations
 
 import base64
@@ -548,8 +549,12 @@ def analyze_with_openai_pro(image_bytes, pair, timeframe, mode, capital, risk_fr
         raise RuntimeError("Missing OPENAI_API_KEY environment variable.")
 
     from openai import OpenAI  # lazy import
-
-    client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    http_client=httpx.Client(
+        timeout=httpx.Timeout(60.0, connect=15.0, read=60.0, write=15.0),
+    ),
+)
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
     image_url = f"data:{image_mime};base64,{base64_image}"
 
@@ -2128,6 +2133,7 @@ def _guess_image_mime(filename: str | None, fallback: str = "image/png") -> str:
         return fallback
     except Exception:
         return fallback
+
 
 
 
