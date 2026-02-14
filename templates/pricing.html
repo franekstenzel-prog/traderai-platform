@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}TraderAI — Pricing{% endblock %}
+{% block content %}
+<section class="section">
+  <div class="section__head">
+    <h1>Pricing</h1>
+    <p class="muted">Start free. Upgrade when you’re ready.</p>
+  </div>
+
+  <div class="grid3">
+    <div class="card card--price">
+      <div class="price__head">
+        <h3>Free</h3>
+        <div class="price__num">$0</div>
+        <div class="muted">{{ FREE_MONTHLY_LIMIT }} analyses / month</div>
+      </div>
+      <ul class="list list--bullets">
+        <li>Screenshot analysis</li>
+        <li>Journal and basic performance</li>
+        <li>Learn modules</li>
+      </ul>
+      {% if user %}
+        {% if user_plan_label == "Free" %}
+          <a class="btn btn--ghost w100" href="{{ url_for('dashboard') }}">Go to app</a>
+        {% else %}
+          <a class="btn btn--ghost w100" href="{{ url_for('dashboard') }}">Go to app</a>
+        {% endif %}
+      {% else %}
+        <a class="btn btn--ghost w100" href="{{ url_for('signup') }}">Create account</a>
+      {% endif %}
+    </div>
+
+    <div class="card card--price card--highlight">
+      <div class="price__head">
+        <h3>Pro Monthly</h3>
+        <div class="price__num">{{ PRO_PRICE_MONTHLY_PLN }} PLN</div>
+        <div class="muted">Unlimited analyses</div>
+      </div>
+      <ul class="list list--bullets">
+        <li>Unlimited analyses</li>
+        <li>Advanced journal + performance</li>
+        <li>Priority improvements</li>
+      </ul>
+      {% if user %}
+        {% if stripe_enabled %}
+          <form action="{{ url_for('billing_checkout') }}" method="post">
+            <input type="hidden" name="plan" value="pro_monthly" />
+            <button class="btn btn--primary w100" type="submit">Upgrade monthly</button>
+          </form>
+        {% else %}
+          <div class="muted">Stripe is not configured.</div>
+        {% endif %}
+      {% else %}
+        <a class="btn btn--primary w100" href="{{ url_for('signup') }}">Create account</a>
+      {% endif %}
+    </div>
+
+    <div class="card card--price">
+      <div class="price__head">
+        <h3>Pro Yearly</h3>
+        <div class="price__num">{{ PRO_PRICE_YEARLY_PLN }} PLN</div>
+        <div class="muted">Save ~10%</div>
+      </div>
+      <ul class="list list--bullets">
+        <li>Unlimited analyses</li>
+        <li>Advanced journal + performance</li>
+        <li>Best value</li>
+      </ul>
+      {% if user %}
+        {% if stripe_enabled %}
+          <form action="{{ url_for('billing_checkout') }}" method="post">
+            <input type="hidden" name="plan" value="pro_yearly" />
+            <button class="btn btn--ghost w100" type="submit">Upgrade yearly</button>
+          </form>
+        {% else %}
+          <div class="muted">Stripe is not configured.</div>
+        {% endif %}
+      {% else %}
+        <a class="btn btn--ghost w100" href="{{ url_for('signup') }}">Create account</a>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="muted" style="margin-top:18px">
+    Disclaimer: This tool is for educational purposes only and does not constitute financial advice.
+  </div>
+</section>
+{% endblock %}

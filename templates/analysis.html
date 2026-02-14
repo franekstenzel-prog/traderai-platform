@@ -1,0 +1,115 @@
+{% extends "layout_app.html" %}
+{% set page_title = "Analysis" %}
+{% set active = "analyze" %}
+
+{% block app_top_actions %}
+  <a class="btn btn--ghost" href="{{ url_for('analyze_page') }}">New analysis</a>
+{% endblock %}
+
+{% block app_content %}
+  <div class="grid2">
+    <div class="card">
+      <div class="trade-head">
+        <div class="muted">{{ result.pair }} • {{ result.timeframe }}{% if row['mode'] %} • {{ row['mode'] }}{% endif %}</div>
+        {% if result.signal == "LONG" %}
+          <div class="signal-banner signal-banner--long">LONG</div>
+        {% elif result.signal == "SHORT" %}
+          <div class="signal-banner signal-banner--short">SHORT</div>
+        {% else %}
+          <div class="signal-banner signal-banner--no">NO TRADE</div>
+        {% endif %}
+      </div>
+
+      <div class="muted" style="margin-top:8px">Confidence: <span class="mono">{{ result.confidence }}%</span></div>
+
+      {% if result.signal != "NO_TRADE" %}
+        <div class="trade-grid" style="margin-top:12px">
+          <div class="trade-box trade-box--entry">
+            <div class="trade-box__label">Entry</div>
+            <div class="trade-box__value">{{ result.entry }}</div>
+          </div>
+          <div class="trade-box trade-box--sl">
+            <div class="trade-box__label">Stop loss</div>
+            <div class="trade-box__value">{{ result.stop_loss }}</div>
+          </div>
+          <div class="trade-box trade-box--tp">
+            <div class="trade-box__label">Take profit</div>
+            <div class="trade-box__value">
+              {% if result.take_profit and result.take_profit|length %}
+                <div class="chips">
+                  {% for tp in result.take_profit %}
+                    <span class="chip">{{ tp }}</span>
+                  {% endfor %}
+                </div>
+              {% else %}
+                —
+              {% endif %}
+            </div>
+          </div>
+        </div>
+
+        <div class="card card--inset" style="margin-top:12px">
+          <div class="muted" style="margin-bottom:6px">Setup</div>
+          <div>{{ result.setup }}</div>
+          <div class="muted" style="margin-top:8px">Invalidation: {{ result.invalidation }}</div>
+          <div class="muted" style="margin-top:8px">Risk notes: {{ result.risk }}</div>
+        </div>
+
+        {% if result.rationale is defined and result.rationale and result.rationale|length %}
+          <details class="trade-why" style="margin-top:10px">
+            <summary>Why this idea</summary>
+            <ul>
+              {% for line in result.rationale %}
+                <li>{{ line }}</li>
+              {% endfor %}
+            </ul>
+          </details>
+        {% endif %}
+
+      {% else %}
+        <div class="card card--inset" style="margin-top:12px">
+          <div class="muted" style="margin-bottom:6px">No-trade rationale</div>
+          <div>{{ result.setup }}</div>
+          {% if not result.is_chart %}
+            <div class="muted" style="margin-top:8px">
+              The image doesn’t look like a clear price chart. Try cropping/zooming to the candles and price axis.
+            </div>
+          {% endif %}
+        </div>
+      {% endif %}
+
+      {% if result.news is defined and result.news and result.news.summary %}
+        <div class="card card--inset" style="margin-top:12px">
+          <div class="muted" style="margin-bottom:6px">News context (auto)</div>
+          <div class="muted">Impact: <span class="mono">{{ result.news.impact }}</span></div>
+          <div style="margin-top:6px">{{ result.news.summary }}</div>
+          {% if result.news.key_points and result.news.key_points|length %}
+            <ul style="margin:10px 0 0 18px">
+              {% for k in result.news.key_points %}
+                <li>{{ k }}</li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+        </div>
+      {% endif %}
+
+      <div class="muted" style="margin-top:12px">
+        Educational only. Not financial advice.
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card__title">Screenshot</div>
+      <img class="img-preview" src="data:{{ row['image_mime'] }};base64,{{ row['image_b64'] }}" alt="Uploaded chart" />
+
+      <div class="card card--inset" style="margin-top:12px">
+        <div class="muted" style="margin-bottom:6px">Meta</div>
+        <div class="muted">Created: <span class="mono">{{ row['created_at'][:19].replace('T',' ') }}</span></div>
+        <div class="muted">Pair: <span class="mono">{{ row['pair'] }}</span></div>
+        <div class="muted">Timeframe: <span class="mono">{{ row['timeframe'] }}</span></div>
+        <div class="muted">Capital: <span class="mono">{{ row['capital'] }}</span></div>
+        <div class="muted">Risk: <span class="mono">{{ (row['risk_fraction'] * 100) | round(2) }}%</span></div>
+      </div>
+    </div>
+  </div>
+{% endblock %}

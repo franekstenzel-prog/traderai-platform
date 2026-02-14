@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}TraderAI — AI trading assistant{% endblock %}
+{% block content %}
+
+<section class="hero">
+  <div class="hero__left">
+    <div class="pill">AI-powered trading workflow</div>
+    <h1>Analyze chart screenshots. Track results. Improve execution.</h1>
+    <p class="lead">
+      Screenshot analysis + journal + performance stats + lessons — in one clean dashboard.
+      Educational tool only (not financial advice).
+    </p>
+
+    <div class="hero__cta">
+      {% if user %}
+        <a class="btn btn--primary" href="{{ url_for('dashboard') }}">Open the app</a>
+      {% else %}
+        <a class="btn btn--primary" href="{{ url_for('signup') }}">Create a free account</a>
+        <a class="btn btn--ghost" href="#how">See how it works</a>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="hero__right">
+    <div class="card card--preview">
+      <div class="card__head">
+        <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+        <span class="muted">Preview</span>
+      </div>
+      <div class="preview">
+        <img class="preview__img" src="{{ url_for('static', filename='images/hero_chart.svg') }}" alt="Demo chart" />
+        <div class="preview__meta">
+          <div class="meta__row"><span class="muted">Modules:</span><span>Analyze • Journal • Learn</span></div>
+          <div class="meta__row"><span class="muted">Modes:</span><span>Scalp / Swing</span></div>
+          <div class="meta__row"><span class="muted">Stats:</span><span>Winrate • PnL • Expectancy</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="how" class="section">
+  <div class="section__head">
+    <h2>How it works</h2>
+    <p class="muted">Three steps.</p>
+  </div>
+
+  <div class="slider" data-slider>
+    <div class="slide is-active">
+      <div class="slide__num">01</div>
+      <div class="slide__title">Upload</div>
+      <div class="slide__text">Upload a chart screenshot (PNG/JPG/WEBP).</div>
+    </div>
+    <div class="slide">
+      <div class="slide__num">02</div>
+      <div class="slide__title">Analyze</div>
+      <div class="slide__text">Get a structured plan (NO_TRADE if no edge).</div>
+    </div>
+    <div class="slide">
+      <div class="slide__num">03</div>
+      <div class="slide__title">Improve</div>
+      <div class="slide__text">Log trades, review performance, learn and iterate.</div>
+    </div>
+
+    <div class="slider__controls">
+      <button class="btn btn--ghost" type="button" data-prev>Prev</button>
+      <button class="btn btn--ghost" type="button" data-next>Next</button>
+    </div>
+  </div>
+</section>
+
+<section id="features" class="section">
+  <div class="section__head">
+    <h2>Features</h2>
+    <p class="muted">Focused, practical tools.</p>
+  </div>
+
+  <div class="grid3">
+    <div class="card">
+      <h3>Screenshot analysis</h3>
+      <p class="muted">Direction, entry, stop, take-profit targets, invalidation, risks.</p>
+    </div>
+    <div class="card">
+      <h3>Trade journal</h3>
+      <p class="muted">Log trades and measure results with R-multiples and PnL.</p>
+    </div>
+    <div class="card">
+      <h3>Performance</h3>
+      <p class="muted">Win rate, expectancy, profit factor, streaks, monthly summaries.</p>
+    </div>
+  </div>
+
+  <div class="cta-strip">
+    <div>
+      <div class="cta-strip__title">Ready to try?</div>
+      <div class="muted">Create an account and start with the free plan.</div>
+    </div>
+    <a class="btn btn--primary" href="{{ url_for('signup') }}">Create account</a>
+  </div>
+</section>
+
+<section id="faq" class="section">
+  <div class="section__head">
+    <h2>FAQ</h2>
+    <p class="muted">Quick answers.</p>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>Is this financial advice?</summary>
+      <div class="muted" style="margin-top:8px">No. This is an educational tool. You are responsible for your trades and risk.</div>
+    </details>
+    <details style="margin-top:10px">
+      <summary>Do you store my images?</summary>
+      <div class="muted" style="margin-top:8px">Images are stored to show you your analysis history. You can delete your account to remove data.</div>
+    </details>
+  </div>
+</section>
+
+{% endblock %}

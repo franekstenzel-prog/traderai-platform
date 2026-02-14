@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0B0E14" />
+  <title>{% block title %}TraderAI{% endblock %}</title>
+
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename='images/favicon.png') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="container topbar__inner">
+      <a class="brand" href="{{ url_for('index') }}">
+        <img class="brand__logo" src="{{ url_for('static', filename='images/logo.png') }}" alt="TraderAI" width="32" height="32">
+        <span class="brand__name">TraderAI</span>
+      </a>
+
+      <nav class="nav" aria-label="Primary">
+        <a class="nav__link" href="{{ url_for('index') }}#how">How it works</a>
+        <a class="nav__link" href="{{ url_for('index') }}#features">Features</a>
+        <a class="nav__link" href="{{ url_for('pricing') }}">Pricing</a>
+        <a class="nav__link" href="{{ url_for('index') }}#faq">FAQ</a>
+      </nav>
+
+      <div class="topbar__actions">
+        {% if session.get('uid') %}
+          {% if app_shell %}
+            <button class="btn btn--ghost mobile-nav-btn" type="button" data-sidebar-toggle aria-label="Open menu">Menu</button>
+          {% endif %}
+          <a class="btn btn--ghost" href="{{ url_for('dashboard') }}">App</a>
+          <a class="btn btn--ghost" href="{{ url_for('logout') }}">Log out</a>
+        {% else %}
+          <a class="btn btn--ghost" href="{{ url_for('login') }}">Log in</a>
+          <a class="btn btn--primary" href="{{ url_for('signup') }}">Create account</a>
+        {% endif %}
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="toasts">
+          {% for category, msg in messages %}
+            <div class="toast toast--{{ category }}">{{ msg }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    <div class="container footer__inner">
+      <div class="muted">© {{ year }} TraderAI</div>
+      <div class="muted">Free {{ FREE_MONTHLY_LIMIT }}/mo • Pro unlimited</div>
+    </div>
+  </footer>
+
+  <script defer src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

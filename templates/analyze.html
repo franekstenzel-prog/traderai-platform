@@ -1,0 +1,102 @@
+{% extends "layout_app.html" %}
+{% set page_title = "Analyze" %}
+{% set active = "analyze" %}
+
+{% block app_content %}
+  <div class="card">
+    <div class="card__title">Screenshot analysis</div>
+    <div class="muted" style="margin-bottom:12px">
+      Upload a chart screenshot. You’ll get: direction, entry, stop loss, take-profit targets, and a clear invalidation.
+      If there’s no edge, the assistant should return <span class="mono">NO_TRADE</span>.
+    </div>
+
+    {% if not openai_enabled %}
+      <div class="toast toast--error">
+        OpenAI is not configured (<span class="mono">OPENAI_API_KEY</span>). Analysis is unavailable.
+      </div>
+    {% endif %}
+
+    <form class="form" action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data">
+      <div class="grid3">
+        <label class="field">
+          <span class="field__label">Pair</span>
+          <input name="pair" value="{{ user['default_pair'] or 'BTCUSDT' }}" placeholder="e.g. BTCUSDT" required />
+        </label>
+        <label class="field">
+          <span class="field__label">Timeframe</span>
+          <input name="timeframe" value="{{ user['default_timeframe'] or '1H' }}" placeholder="e.g. 15M / 1H / 4H" required />
+        </label>
+        <label class="field">
+          <span class="field__label">Mode / Aggressiveness</span>
+          <div style="display:flex; gap:10px">
+            <select name="mode">
+              <option value="scalp" {% if (user['default_mode'] or '') == 'scalp' %}selected{% endif %}>Scalp</option>
+              <option value="swing" {% if (user['default_mode'] or '') == 'swing' %}selected{% endif %}>Swing</option>
+            </select>
+            <select name="aggressiveness">
+              <option value="strict" {% if (user['default_aggressiveness'] or '') == 'strict' %}selected{% endif %}>Strict</option>
+              <option value="balanced" {% if (user['default_aggressiveness'] or 'balanced') == 'balanced' %}selected{% endif %}>Balanced</option>
+              <option value="aggressive" {% if (user['default_aggressiveness'] or '') == 'aggressive' %}selected{% endif %}>Aggressive</option>
+            </select>
+          </div>
+          <span class="field__hint muted">Strict = fewer but cleaner setups. Aggressive = more signals with lower confidence. Risk per trade stays fixed.</span>
+        </label>
+      </div>
+
+      <div class="grid3" style="margin-top:10px">
+        <label class="field">
+          <span class="field__label">Capital</span>
+          <input name="capital" value="{{ user['default_capital'] or 1000 }}" inputmode="decimal" placeholder="e.g. 10000" required />
+        </label>
+        <label class="field">
+          <span class="field__label">Risk per trade (fraction)</span>
+          <input name="risk_fraction" value="{{ user['default_risk_fraction'] or 0.02 }}" inputmode="decimal" placeholder="0.02 = 2%" required />
+          <span class="field__hint muted">Use a fraction of capital (0.02 = 2%).</span>
+        </label>
+        <label class="field">
+          <span class="field__label">Screenshot (PNG/JPG/WEBP)</span>
+          <input name="chart" type="file" accept=".png,.jpg,.jpeg,.webp" required />
+        </label>
+      </div>
+
+      <details class="card" style="margin-top:12px;padding:12px">
+        <summary class="muted" style="cursor:pointer">Advanced: costs (spread / fees / slippage)</summary>
+        <div class="grid3" style="margin-top:10px">
+          <label class="field">
+            <span class="field__label">Spread (bps)</span>
+            <input name="spread_bps" value="{{ user['default_spread_bps'] or 5 }}" inputmode="decimal" />
+            <span class="field__hint muted">5 bps = 0.05%</span>
+          </label>
+          <label class="field">
+            <span class="field__label">Fees round-trip (bps)</span>
+            <input name="fee_bps" value="{{ user['default_fee_bps'] or 4 }}" inputmode="decimal" />
+          </label>
+          <label class="field">
+            <span class="field__label">Slippage round-trip (bps)</span>
+            <input name="slippage_bps" value="{{ user['default_slippage_bps'] or 2 }}" inputmode="decimal" />
+          </label>
+        </div>
+      </details>
+
+
+        <button class="btn btn--primary" type="submit" {% if not openai_enabled %}disabled{% endif %}>Analyze</button>
+        <div class="muted small">Free limit: {{ FREE_MONTHLY_LIMIT }}/month. News context is fetched automatically (best effort).</div>
+      </div>
+    </form>
+  </div>
+
+  {% if recent and recent|length %}
+    <div class="card" style="margin-top:16px">
+      <div class="card__title">Recent analyses</div>
+      <div class="list">
+        {% for r in recent %}
+          <a class="list__row" href="{{ url_for('analysis_view', analysis_id=r['id']) }}">
+            <span class="mono">{{ r['pair'] }} • {{ r['timeframe'] }} • {{ (r['mode'] or '—')|upper }}</span>
+            <span class="muted">{{ r['created_at'][:10] }}</span>
+          </a>
+        {% endfor %}
+      </div>
+    </div>
+  {% endif %}
+{% endblock %}
+

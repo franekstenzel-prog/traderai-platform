@@ -1,0 +1,83 @@
+{% extends "layout_app.html" %}
+{% set page_title = "Account" %}
+{% set active = "account" %}
+
+{% block app_content %}
+  <div class="grid2">
+    <div class="card">
+      <div class="card__title">Defaults</div>
+      <div class="muted" style="margin-bottom:12px">These defaults are used to pre-fill Analyze and Journal forms.</div>
+      <form class="form" action="{{ url_for('account') }}" method="post">
+        <input type="hidden" name="action" value="update_defaults" />
+        <div class="grid2">
+          <label class="field">
+            <span class="field__label">Default symbol</span>
+            <input name="default_pair" value="{{ user['default_pair'] or 'BTCUSDT' }}" placeholder="BTCUSDT" />
+          </label>
+          <label class="field">
+            <span class="field__label">Default timeframe</span>
+            <input name="default_timeframe" value="{{ user['default_timeframe'] or '1H' }}" placeholder="15M / 1H / 4H" />
+          </label>
+        </div>
+        <div class="grid2" style="margin-top:10px">
+          <label class="field">
+            <span class="field__label">Default capital</span>
+            <input name="default_capital" value="{{ user['default_capital'] or 1000 }}" inputmode="decimal" />
+          </label>
+          <label class="field">
+            <span class="field__label">Default risk (fraction)</span>
+            <input name="default_risk_fraction" value="{{ user['default_risk_fraction'] or 0.02 }}" inputmode="decimal" placeholder="0.02" />
+            <span class="field__hint muted">Example: 0.02 = 2%</span>
+          </label>
+        </div>
+        <div class="grid2" style="margin-top:10px">
+          <label class="field">
+            <span class="field__label">Default mode</span>
+            <select name="default_mode">
+              <option value="scalp" {% if (user['default_mode'] or 'swing')=='scalp' %}selected{% endif %}>Scalp</option>
+              <option value="swing" {% if (user['default_mode'] or 'swing')=='swing' %}selected{% endif %}>Swing</option>
+            </select>
+          </label>
+          <div class="field">
+            <span class="field__label">Action</span>
+            <button class="btn btn--primary" type="submit">Save defaults</button>
+          </div>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <div class="card__title">Security</div>
+      <form class="form" action="{{ url_for('account') }}" method="post" style="margin-bottom:14px">
+        <input type="hidden" name="action" value="change_password" />
+        <label class="field">
+          <span class="field__label">Current password</span>
+          <input name="current_password" type="password" required />
+        </label>
+        <label class="field">
+          <span class="field__label">New password</span>
+          <input name="new_password" type="password" required />
+        </label>
+        <button class="btn btn--ghost" type="submit">Change password</button>
+      </form>
+
+      <div class="card card--inset">
+        <div class="muted" style="margin-bottom:10px">Export your data</div>
+        <a class="btn btn--ghost" href="{{ url_for('account_export') }}">Download JSON</a>
+      </div>
+
+      <div class="card card--inset" style="margin-top:12px">
+        <div class="muted" style="margin-bottom:10px">Danger zone</div>
+        <form action="{{ url_for('account') }}" method="post" onsubmit="return confirm('Delete your account and all data? This cannot be undone.');">
+          <input type="hidden" name="action" value="delete_account" />
+          <label class="field">
+            <span class="field__label">Confirm with your password</span>
+            <input name="confirm_password" type="password" required />
+          </label>
+          <button class="btn" type="submit" style="border-color: rgba(239,68,68,.35)">Delete account</button>
+        </form>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+
