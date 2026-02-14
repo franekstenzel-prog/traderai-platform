@@ -536,16 +536,7 @@ def auto_news_context(pair: str, timeframe: str = "") -> str:
 # -----------------------------
 # OpenAI: chart analysis (v2.6 PRO, English output)
 # -----------------------------
-def analyze_with_openai_pro(
-    image_bytes: bytes,
-    image_mime: str,
-    pair: str,
-    timeframe: str,
-    capital: float,
-    risk_fraction: float,
-    mode: str,
-    news_context: str = "",
-) -> dict:
+def analyze_with_openai_pro(image_bytes, pair, timeframe, mode, capital, risk_fraction, spread_bps=None, fee_bps=None, slippage_bps=None, **_ignored):
     """English, concise instruction set with permissive NO_TRADE."""
 
     if not OPENAI_API_KEY:
@@ -983,6 +974,9 @@ def analyze():
     capital = _f("capital", float(user["default_capital"] or 1000))
     risk_fraction = _f("risk_fraction", float(user["default_risk_fraction"] or 0.02))
 
+    spread_bps = _f("spread_bps", float(row_get(user, "default_spread_bps") or _default_spread_bps_for_pair(pair)))
+    fee_bps = _f("fee_bps", float(row_get(user, "default_fee_bps") or 4.0))
+    slippage_bps = _f("slippage_bps", float(row_get(user, "default_slippage_bps") or 2.0))
     # Auto news (best-effort) — do not ask the user for it.
     news_context = auto_news_context(pair=pair, timeframe=timeframe)
 
@@ -2012,3 +2006,4 @@ def billing_portal():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
