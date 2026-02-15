@@ -551,7 +551,7 @@ def analyze_with_openai_pro(
     mode: str,
     news_context: str = "",
 ) -> dict:
-    """English, concise instruction set with permissive NO_TRADE."""
+    """English instruction set that strongly prefers LONG/SHORT and uses micro trades instead of NO_TRADE."""
 
     if not OPENAI_API_KEY:
         raise RuntimeError("Missing OPENAI_API_KEY environment variable.")
@@ -623,9 +623,12 @@ def analyze_with_openai_pro(
 You are a professional trading analyst.
 
 Task:
-1) First decide whether the image contains a readable price chart screenshot. Set is_chart=false if it is NOT a chart, or if prices/timeframe are not readable.
-2) If is_chart=true, return one of: LONG, SHORT, or NO_TRADE.
-   - Use NO_TRADE if there is no clear edge, if structure is messy, or if risk is not definable.
+1) First decide whether the image contains a readable price chart screenshot. Set is_chart=false ONLY if it is NOT a chart, or if candles/price scale/timeframe are not readable.
+2) If is_chart=true, you MUST return a direction: LONG or SHORT.
+   - NO_TRADE is allowed ONLY if the image is not a readable chart (missing/unclear candles, price scale, or timeframe).
+   - If the edge is weak or structure is messy, DO NOT output NO_TRADE. Instead output a LOW-EDGE trade idea:
+     * prefer a range mean-reversion plan: short near the nearest resistance / long near the nearest support
+     * use smaller position_size (micro) and a tight invalidation, but still beyond the nearest liquidity pool
    - Never invent indicators or numbers not visible on the screenshot.
 
 Context:
@@ -633,16 +636,28 @@ Context:
 - Timeframe: {timeframe}
 - Mode: {mode_norm.upper()} (SCALP = tighter SL/TP, quicker invalidation; SWING = wider structure-based levels)
 - Capital: {capital}
-- Risk per trade: {risk_fraction} (fraction of capital, e.g. 0.02 = 2%)
+- Risk per trade (MAX): {risk_fraction} (fraction of capital, e.g. 0.02 = 2%)
 
 News (best-effort, may be empty):
 {news_context or ""}
 
 Output rules:
 - Return ONLY JSON matching the schema (no markdown).
-- If signal=NO_TRADE, set entry=null, stop_loss=null, position_size=null, take_profit=[] and explain clearly why.
-- If LONG/SHORT, provide concrete entry/SL/TP levels (numbers or tight ranges) and a clear invalidation.
-- Provide 6–12 short bullet points in rationale (structure, levels, liquidity/price action, and the biggest risk).
+- Avoid NO_TRADE unless the image is not a readable chart.
+- If LONG/SHORT, ALWAYS provide concrete entry/SL/TP levels (numbers or tight ranges) and a clear invalidation.
+- SL must be placed beyond the nearest liquidity pool (not directly at a local swing).
+
+Position sizing rule:
+- Treat risk_fraction as the MAX risk for this trade.
+- Scale position_size by confidence:
+  * confidence 50–59 -> use 0.25 x risk_fraction (micro)
+  * confidence 60–69 -> use 0.50 x risk_fraction
+  * confidence 70–79 -> use 0.80 x risk_fraction
+  * confidence 80–100 -> use 1.00 x risk_fraction
+- If the setup is LOW-EDGE, keep position_size micro and prioritize fast exits.
+
+Rationale:
+- Provide 6–12 short bullet points (structure, levels, liquidity/price action, and the biggest risk).
 """
 
     resp = client.responses.create(
