@@ -46,8 +46,8 @@ except Exception:
 
 FREE_MONTHLY_LIMIT = 3
 PRO_MONTHLY_LIMIT = None  # unlimited
-PRO_PRICE_MONTHLY_PLN = 19
-PRO_PRICE_YEARLY_PLN = 199  # -10%
+PRO_PRICE_MONTHLY_PLN = 99
+PRO_PRICE_YEARLY_PLN = int(round(12 * PRO_PRICE_MONTHLY_PLN * 0.9))  # -10%
 
 SECRET_KEY = os.environ.get("SECRET_KEY") or "dev-secret-change-me"
 
@@ -551,7 +551,7 @@ def analyze_with_openai_pro(
     mode: str,
     news_context: str = "",
 ) -> dict:
-    """English instruction set that strongly prefers LONG/SHORT and uses micro trades instead of NO_TRADE."""
+    """English, concise instruction set with permissive NO_TRADE."""
 
     if not OPENAI_API_KEY:
         raise RuntimeError("Missing OPENAI_API_KEY environment variable.")
@@ -623,41 +623,39 @@ def analyze_with_openai_pro(
 You are a professional trading analyst.
 
 Task:
-1) First decide whether the image contains a readable price chart screenshot. Set is_chart=false ONLY if it is NOT a chart, or if candles/price scale/timeframe are not readable.
+1) First decide whether the image contains a readable price chart screenshot.
+   - Set is_chart=false ONLY if it is NOT a chart OR if candles/prices/timeframe are not readable.
 2) If is_chart=true, you MUST return a direction: LONG or SHORT.
-   - NO_TRADE is allowed ONLY if the image is not a readable chart (missing/unclear candles, price scale, or timeframe).
-   - If the edge is weak or structure is messy, DO NOT output NO_TRADE. Instead output a LOW-EDGE trade idea:
-     * prefer a range mean-reversion plan: short near the nearest resistance / long near the nearest support
-     * use smaller position_size (micro) and a tight invalidation, but still beyond the nearest liquidity pool
-   - Never invent indicators or numbers not visible on the screenshot.
+   - Do NOT output NO_TRADE for a readable chart.
+   - If the edge is weak or structure is messy, output a LOW-EDGE trade instead:
+     * prefer mean-reversion: long near nearest support / short near nearest resistance
+     * keep SL beyond the nearest liquidity pool (not right under/over the local swing)
+     * use smaller sizing (micro) but still provide a concrete plan
 
 Context:
 - Pair: {pair}
 - Timeframe: {timeframe}
 - Mode: {mode_norm.upper()} (SCALP = tighter SL/TP, quicker invalidation; SWING = wider structure-based levels)
 - Capital: {capital}
-- Risk per trade (MAX): {risk_fraction} (fraction of capital, e.g. 0.02 = 2%)
+- Risk per trade (max): {risk_fraction} (fraction of capital, e.g. 0.02 = 2%)
 
 News (best-effort, may be empty):
 {news_context or ""}
 
 Output rules:
 - Return ONLY JSON matching the schema (no markdown).
-- Avoid NO_TRADE unless the image is not a readable chart.
-- If LONG/SHORT, ALWAYS provide concrete entry/SL/TP levels (numbers or tight ranges) and a clear invalidation.
-- SL must be placed beyond the nearest liquidity pool (not directly at a local swing).
+- If is_chart=false: signal MUST be NO_TRADE and set entry=null, stop_loss=null, position_size=null, take_profit=[].
+- If is_chart=true: signal MUST be LONG or SHORT, and you MUST provide entry/SL/TP levels (numbers or tight ranges) and a clear invalidation.
+- Provide 6–12 short bullet points in rationale (structure, levels, liquidity/price action, and the biggest risk).
 
-Position sizing rule:
+Position sizing rule (important):
 - Treat risk_fraction as the MAX risk for this trade.
-- Scale position_size by confidence:
-  * confidence 50–59 -> use 0.25 x risk_fraction (micro)
-  * confidence 60–69 -> use 0.50 x risk_fraction
-  * confidence 70–79 -> use 0.80 x risk_fraction
-  * confidence 80–100 -> use 1.00 x risk_fraction
-- If the setup is LOW-EDGE, keep position_size micro and prioritize fast exits.
-
-Rationale:
-- Provide 6–12 short bullet points (structure, levels, liquidity/price action, and the biggest risk).
+- Scale the used risk by confidence:
+  * confidence 50–59 -> 0.25x risk_fraction (micro)
+  * confidence 60–69 -> 0.50x risk_fraction
+  * confidence 70–79 -> 0.80x risk_fraction
+  * confidence 80–100 -> 1.00x risk_fraction
+- Do NOT output tiny position_size like "1%" unless confidence is below 60.
 """
 
     resp = client.responses.create(
@@ -760,6 +758,39 @@ Rationale:
     if not isinstance(result.get("rationale"), list):
         result["rationale"] = [str(result.get("rationale") or "")]
     result["take_profit"] = [str(x) for x in (result.get("take_profit") or []) if str(x).strip()]
+
+    # ---- Auto position sizing (override LLM "position_size") ----
+    # Compute notional size from: risk_amount / stop_distance (in quote currency).
+    # This prevents absurdly small sizes like "1%".
+    conf = int(result.get("confidence") or 0)
+
+    if conf < 60:
+        conf_mult = 0.25
+    elif conf < 70:
+        conf_mult = 0.50
+    elif conf < 80:
+        conf_mult = 0.80
+    else:
+        conf_mult = 1.00
+
+    entry_n = _first_number(result.get("entry"))
+    sl_n = _first_number(result.get("stop_loss"))
+
+    if entry_n and sl_n and entry_n > 0:
+        stop_frac = abs(entry_n - sl_n) / entry_n  # e.g. 0.005 = 0.5%
+        stop_frac = max(stop_frac, 0.001)  # min 0.10% to avoid insane sizing on ultra-tight SL
+
+        risk_amount = float(capital) * float(risk_fraction) * conf_mult
+        notional = risk_amount / stop_frac
+
+        # Cap by a reasonable max exposure (10x leverage * 80% usage)
+        max_notional = float(capital) * 10.0 * 0.80
+        notional = min(notional, max_notional)
+
+        exposure_x = notional / float(capital) if float(capital) else 0.0
+        exposure_pct = exposure_x * 100.0
+
+        result["position_size"] = f"{notional:.0f} (≈{exposure_x:.2f}x, {exposure_pct:.0f}% capital)"
 
     return result
 
