@@ -47,7 +47,7 @@ except Exception:
 FREE_MONTHLY_LIMIT = 3
 PRO_MONTHLY_LIMIT = None  # unlimited
 PRO_PRICE_MONTHLY_PLN = 19
-PRO_PRICE_YEARLY_PLN = 199
+PRO_PRICE_YEARLY_PLN = 199  # -10%
 
 SECRET_KEY = os.environ.get("SECRET_KEY") or "dev-secret-change-me"
 
@@ -101,7 +101,7 @@ def _column_exists(db: sqlite3.Connection, table: str, column: str) -> bool:
 
 
 def _ensure_columns(db: sqlite3.Connection) -> None:
-    # Users table may evolve over time - add missing columns safely.
+    # Users table may evolve over time — add missing columns safely.
     needed = {
         "stripe_customer_id": "TEXT",
         "stripe_subscription_id": "TEXT",
@@ -582,8 +582,6 @@ def analyze_with_openai_pro(
             "take_profit": {"type": "array", "items": {"type": "string"}},
             "support_levels": {"type": "array", "items": {"type": "string"}},
             "resistance_levels": {"type": "array", "items": {"type": "string"}},
-            "major_support": {"type": ["string","null"]},
-            "major_resistance": {"type": ["string","null"]},
             "position_size": {"type": ["string", "null"]},
             "risk": {"type": "string"},
             "invalidation": {"type": "string"},
@@ -615,8 +613,6 @@ def analyze_with_openai_pro(
             "take_profit",
             "support_levels",
             "resistance_levels",
-            "major_support",
-            "major_resistance",
             "position_size",
             "risk",
             "invalidation",
@@ -638,12 +634,9 @@ Task:
 
 Support/Resistance rule (MANDATORY):
 - IMPORTANT: levels must be MEANINGFUL (swing highs/lows, consolidation boundaries). Do NOT use tiny micro-levels a few dollars away.
-- Extract 3-6 SUPPORT levels below current price and 3-6 RESISTANCE levels above current price visible on the chart.
-- Populate support_levels and resistance_levels with those prices (strings like "1975" or "1975.5").
-- Additionally, set major_support and major_resistance to the closest *major* support/resistance (range low/high or last swing low/high).
-- For SWING mode, major_resistance/major_support should typically be at least ~5% away when the market is ranging (avoid tiny TP like +1-2%).
+- IMPORTANT: nearest resistance/support should normally be at least ~1% away from current price for SWING, unless the chart is very tight-range.
 
-- Extract 2-4 nearest SUPPORT levels below current price and 2-4 nearest RESISTANCE levels above current price visible on the chart.
+- Extract 2–4 nearest SUPPORT levels below current price and 2–4 nearest RESISTANCE levels above current price visible on the chart.
 - Populate support_levels and resistance_levels with those prices (strings like "1975" or "1975.5").
 - If signal=LONG:
   * Entry: near current price or near nearest support (tight range allowed)
@@ -668,9 +661,9 @@ Output rules:
 - Return ONLY JSON matching the schema (no markdown).
 - Avoid NO_TRADE unless the image is not a readable price chart.
 - If LONG/SHORT, ALWAYS provide concrete entry/SL/TP and ensure TP is the nearest opposing level (TP at nearest resistance for LONG / nearest support for SHORT) and SL is beyond the nearest protective level with a small buffer.
-- Always fill support_levels and resistance_levels (2-4 each) based on visible chart levels.
+- Always fill support_levels and resistance_levels (2–4 each) based on visible chart levels.
 - If LONG/SHORT, provide concrete entry/SL/TP levels (numbers or tight ranges) and a clear invalidation.
-- Provide 6-12 short bullet points in rationale (structure, levels, liquidity/price action, and the biggest risk).
+- Provide 6–12 short bullet points in rationale (structure, levels, liquidity/price action, and the biggest risk).
 """
 
     resp = client.responses.create(
@@ -765,9 +758,6 @@ Output rules:
     supports = _parse_levels(result.get("support_levels") or [])
     resistances = _parse_levels(result.get("resistance_levels") or [])
 
-    major_sup = _first_number(result.get("major_support"))
-    major_res = _first_number(result.get("major_resistance"))
-
     def _nearest_below(levels, x):
         below = [lv for lv in levels if lv < x]
         return max(below) if below else None
@@ -807,8 +797,8 @@ Output rules:
 
     # If the model still returned NO_TRADE on a readable chart, force a direction
     if sig == "NO_TRADE" and entry_n is not None:
-        ns = (major_sup if (major_sup is not None and major_sup < entry_n) else _nearest_below(supports, entry_n))
-        nr = (major_res if (major_res is not None and major_res > entry_n) else _nearest_above(resistances, entry_n))
+        ns = _nearest_below(supports, entry_n)
+        nr = _nearest_above(resistances, entry_n)
         # Decide by proximity: closer to support => LONG, else SHORT
         if ns is None and nr is None:
             sig = "LONG"
@@ -820,55 +810,55 @@ Output rules:
             sig = "LONG" if (entry_n - ns) <= (nr - entry_n) else "SHORT"
         result["signal"] = sig
 
-    # Enforce "TP at nearest opposing level" and "SL beyond nearest protective level"
-    if entry_n is not None and sl_n is not None:
-        buffer_abs = max(entry_n * 0.0015, entry_n * 0.0005)
+    
+    # ---------------------------------------------------------
+    # NEW TRADE ENGINE (RR enforced, logical TP/SL)
+    # ---------------------------------------------------------
+    buffer_pct = 0.0025
+    rr_min = 2.2 if mode_norm == "swing" else 1.2
 
-        # Minimum TP distance to avoid micro 'noise' levels
-        min_tp_dist_frac = 0.01 if mode_norm == "scalp" else 0.05  # 0.5% scalp, 1.5% swing
-  # ~0.15% buffer (min 0.05%)
-
+    if sig in ("LONG", "SHORT") and entry_n is not None:
         if sig == "LONG":
-            ns = (major_sup if (major_sup is not None and major_sup < entry_n) else _nearest_below(supports, entry_n))
-            nr = (major_res if (major_res is not None and major_res > entry_n and (major_res-entry_n)/entry_n >= min_tp_dist_frac) else _pick_tp_above(resistances, entry_n, min_tp_dist_frac))
-            # Override TP to meaningful resistance (avoid micro levels)
-            if nr is not None:
-                result["take_profit"] = [_fmt_level(nr)]
-                tp0_n = nr
-            # Override SL to below nearest support if available
-            if ns is not None:
-                sl_new = ns - buffer_abs
-                if sl_new < entry_n:
-                    result["stop_loss"] = _fmt_level(sl_new)
-                    sl_n = sl_new
+            nearest_support = max([s for s in supports if s < entry_n], default=None)
+            nearest_res = min([r for r in resistances if r > entry_n], default=None)
 
-        elif sig == "SHORT":
-            nr = (major_res if (major_res is not None and major_res > entry_n) else _nearest_above(resistances, entry_n))
-            ns = (major_sup if (major_sup is not None and major_sup < entry_n) else _nearest_below(supports, entry_n))
-            if ns is not None:
-                # pick meaningful TP (avoid micro levels)
-                tp_sel = (major_sup if (major_sup is not None and major_sup < entry_n and (entry_n-major_sup)/entry_n >= min_tp_dist_frac) else _pick_tp_below(supports, entry_n, min_tp_dist_frac))
-                if tp_sel is not None:
-                    result["take_profit"] = [_fmt_level(tp_sel)]
-                    tp0_n = tp_sel
-            if nr is not None:
-                sl_new = nr + buffer_abs
-                if sl_new > entry_n:
-                    result["stop_loss"] = _fmt_level(sl_new)
-                    sl_n = sl_new
+            if nearest_support:
+                sl_n = nearest_support * (1 - buffer_pct)
 
-    # Ensure support_levels/resistance_levels exist as lists of strings
-    if not isinstance(result.get("support_levels"), list):
-        result["support_levels"] = []
-    if not isinstance(result.get("resistance_levels"), list):
-        result["resistance_levels"] = []
-    result["support_levels"] = [str(x) for x in (result.get("support_levels") or []) if str(x).strip()]
-    result["resistance_levels"] = [str(x) for x in (result.get("resistance_levels") or []) if str(x).strip()]
+            if sl_n and sl_n < entry_n:
+                R = entry_n - sl_n
+                tp_rr = entry_n + rr_min * R
+                tp_final = max(tp_rr, nearest_res) if nearest_res else tp_rr
 
-    if sig == "LONG" and entry_n is not None and sl_n is not None:
-        if sl_n >= entry_n:
-            _force_no_trade("NO_TRADE: inconsistent levels (for LONG, SL must be below entry).")
-            return result
+                result["stop_loss"] = str(round(sl_n, 2))
+                result["take_profit"] = [str(round(tp_final, 2))]
+
+        if sig == "SHORT":
+            nearest_res = min([r for r in resistances if r > entry_n], default=None)
+            nearest_support = max([s for s in supports if s < entry_n], default=None)
+
+            if nearest_res:
+                sl_n = nearest_res * (1 + buffer_pct)
+
+            if sl_n and sl_n > entry_n:
+                R = sl_n - entry_n
+                tp_rr = entry_n - rr_min * R
+                tp_final = min(tp_rr, nearest_support) if nearest_support else tp_rr
+
+                result["stop_loss"] = str(round(sl_n, 2))
+                result["take_profit"] = [str(round(tp_final, 2))]
+
+        sl_n = _first_number(result.get("stop_loss"))
+        if entry_n and sl_n:
+            stop_distance = abs(entry_n - sl_n)
+            if stop_distance > 0:
+                risk_amount = capital * risk_fraction
+                notional = risk_amount / stop_distance
+                max_notional = capital * 8
+                notional = min(notional, max_notional)
+                result["position_size"] = str(round(notional, 2))
+
+    return result
         if tp0_n is not None and tp0_n <= entry_n:
             _force_no_trade("NO_TRADE: inconsistent levels (for LONG, TP must be above entry).")
             return result
@@ -886,27 +876,6 @@ Output rules:
     if not isinstance(result.get("rationale"), list):
         result["rationale"] = [str(result.get("rationale") or "")]
     result["take_profit"] = [str(x) for x in (result.get("take_profit") or []) if str(x).strip()]
-
-
-    # -----------------------------
-    # Position sizing (backend, deterministic)
-    # -----------------------------
-    # Compute notional from risk and stop distance to avoid tiny "1%" model outputs.
-    try:
-        entry_n2 = _first_number(result.get("entry"))
-        sl_n2 = _first_number(result.get("stop_loss"))
-        if result.get("signal") in ("LONG", "SHORT") and entry_n2 and sl_n2:
-            stop_frac = abs(entry_n2 - sl_n2) / float(entry_n2)
-            stop_frac = max(stop_frac, 0.001)  # min 0.10% to avoid insane size
-            risk_amount = float(capital) * float(risk_fraction)
-            notional = risk_amount / stop_frac
-            # cap exposure to 8x capital by default (10x leverage * 80% usage)
-            max_notional = float(capital) * 10.0 * 0.80
-            notional = min(notional, max_notional)
-            x = notional / float(capital) if float(capital) else 0.0
-            result["position_size"] = f"{notional:.0f} (~{x:.2f}x)"
-    except Exception:
-        pass
 
     return result
 
@@ -1150,7 +1119,7 @@ def analyze():
     capital = _f("capital", float(user["default_capital"] or 1000))
     risk_fraction = _f("risk_fraction", float(user["default_risk_fraction"] or 0.02))
 
-    # Auto news (best-effort) - do not ask the user for it.
+    # Auto news (best-effort) — do not ask the user for it.
     news_context = auto_news_context(pair=pair, timeframe=timeframe)
 
     file = request.files.get("chart")
@@ -1496,7 +1465,7 @@ LESSONS: list[dict] = [
         "title": "Market structure in 10 minutes",
         "minutes": 10,
         "body": [
-            "Your job is not to predict - it is to react to structure.",
+            "Your job is not to predict — it is to react to structure.",
             "On any timeframe, structure is defined by swing highs/lows. Uptrend: HH/HL. Downtrend: LH/LL.",
             "The cleanest entries happen after a break of structure (BOS) and a controlled pullback into a key level.",
             "Avoid taking trades in the middle of a range. If you must trade a range, trade the edges with a tight invalidation.",
@@ -1520,8 +1489,8 @@ LESSONS: list[dict] = [
         "title": "Risk: the only thing you control",
         "minutes": 8,
         "body": [
-            "Pick a fixed risk per trade (e.g., 1-2%) and keep it constant.",
-            "Position size is a consequence of your stop distance - not the other way around.",
+            "Pick a fixed risk per trade (e.g., 1–2%) and keep it constant.",
+            "Position size is a consequence of your stop distance — not the other way around.",
             "If a setup forces a stop that is too wide for your risk, skip the trade.",
             "Never move your stop farther. You can reduce risk, not increase it mid-trade.",
         ],
@@ -1569,7 +1538,7 @@ LESSONS: list[dict] = [
         "minutes": 12,
         "body": [
             "Take profit at logical magnets: prior highs/lows, range edges, liquidity pools.",
-            "Scaling out is optional. If you scale, do it at predefined levels - not emotions.",
+            "Scaling out is optional. If you scale, do it at predefined levels — not emotions.",
             "Break-even is a tool, not a religion. Use it when structure confirms your direction.",
             "Track results in R-multiple. It keeps you honest across position sizes.",
         ],
@@ -1608,7 +1577,7 @@ def learn():
 
     # Nice descriptions
     desc = {
-        "Foundations": "Structure, levels, and risk - the non-negotiables.",
+        "Foundations": "Structure, levels, and risk — the non-negotiables.",
         "Liquidity": "Sweeps, traps, and high-probability areas.",
         "Execution": "Repeatable triggers and management rules.",
     }
@@ -2110,7 +2079,7 @@ def stripe_webhook():
     obj = event["data"]["object"]
     db = get_db()
 
-    # 1) Checkout completed - link subscription to user
+    # 1) Checkout completed — link subscription to user
     if etype == "checkout.session.completed":
         user_id = int(obj.get("metadata", {}).get("user_id", "0") or 0)
         sub_id = obj.get("subscription")
@@ -2140,7 +2109,7 @@ def stripe_webhook():
             else:
                 _apply_subscription_to_user(db, u["id"], sub)
 
-    # 3) Payment failures - keep grace until period_end if possible
+    # 3) Payment failures — keep grace until period_end if possible
     if etype in ("invoice.payment_failed", "invoice.payment_action_required"):
         customer_id = obj.get("customer")
         u = None
