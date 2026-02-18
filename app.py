@@ -46,8 +46,8 @@ except Exception:
 
 FREE_MONTHLY_LIMIT = 3
 PRO_MONTHLY_LIMIT = None  # unlimited
-PRO_PRICE_MONTHLY_PLN = 99
-PRO_PRICE_YEARLY_PLN = int(round(12 * PRO_PRICE_MONTHLY_PLN * 0.9))  # -10%
+PRO_PRICE_MONTHLY_PLN = 19
+PRO_PRICE_YEARLY_PLN = 199  # -10%
 
 SECRET_KEY = os.environ.get("SECRET_KEY") or "dev-secret-change-me"
 
