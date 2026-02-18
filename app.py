@@ -47,7 +47,7 @@ except Exception:
 FREE_MONTHLY_LIMIT = 3
 PRO_MONTHLY_LIMIT = None  # unlimited
 PRO_PRICE_MONTHLY_PLN = 19
-PRO_PRICE_YEARLY_PLN = 199  # -10%
+PRO_PRICE_YEARLY_PLN = 99  # -10%
 
 SECRET_KEY = os.environ.get("SECRET_KEY") or "dev-secret-change-me"
 
@@ -580,6 +580,8 @@ def analyze_with_openai_pro(
             "entry": {"type": ["string", "null"]},
             "stop_loss": {"type": ["string", "null"]},
             "take_profit": {"type": "array", "items": {"type": "string"}},
+            "support_levels": {"type": "array", "items": {"type": "string"}},
+            "resistance_levels": {"type": "array", "items": {"type": "string"}},
             "position_size": {"type": ["string", "null"]},
             "risk": {"type": "string"},
             "invalidation": {"type": "string"},
@@ -609,6 +611,8 @@ def analyze_with_openai_pro(
             "entry",
             "stop_loss",
             "take_profit",
+            "support_levels",
+            "resistance_levels",
             "position_size",
             "risk",
             "invalidation",
@@ -623,39 +627,40 @@ def analyze_with_openai_pro(
 You are a professional trading analyst.
 
 Task:
-1) First decide whether the image contains a readable price chart screenshot.
-   - Set is_chart=false ONLY if it is NOT a chart OR if candles/prices/timeframe are not readable.
+1) First decide whether the image contains a readable price chart screenshot. Set is_chart=false if it is NOT a chart, or if prices/timeframe are not readable.
 2) If is_chart=true, you MUST return a direction: LONG or SHORT.
-   - Do NOT output NO_TRADE for a readable chart.
-   - If the edge is weak or structure is messy, output a LOW-EDGE trade instead:
-     * prefer mean-reversion: long near nearest support / short near nearest resistance
-     * keep SL beyond the nearest liquidity pool (not right under/over the local swing)
-     * use smaller sizing (micro) but still provide a concrete plan
+   - NO_TRADE is allowed ONLY if the image is not a readable price chart (candles/price scale/timeframe not readable).
+   - If the edge is weak or structure is messy, do NOT output NO_TRADE. Instead produce a LOW-EDGE trade using the nearest support/resistance.
+
+Support/Resistance rule (MANDATORY):
+- Extract 2–4 nearest SUPPORT levels below current price and 2–4 nearest RESISTANCE levels above current price visible on the chart.
+- Populate support_levels and resistance_levels with those prices (strings like "1975" or "1975.5").
+- If signal=LONG:
+  * Entry: near current price or near nearest support (tight range allowed)
+  * Stop-loss: below the nearest support (not just under a local wick; beyond liquidity) with a small buffer
+  * Take-profit: at the nearest resistance above entry (first clear resistance)
+- If signal=SHORT:
+  * Entry: near current price or near nearest resistance
+  * Stop-loss: above the nearest resistance with a small buffer
+  * Take-profit: at the nearest support below entry (first clear support)
 
 Context:
 - Pair: {pair}
 - Timeframe: {timeframe}
 - Mode: {mode_norm.upper()} (SCALP = tighter SL/TP, quicker invalidation; SWING = wider structure-based levels)
 - Capital: {capital}
-- Risk per trade (max): {risk_fraction} (fraction of capital, e.g. 0.02 = 2%)
+- Risk per trade: {risk_fraction} (fraction of capital, e.g. 0.02 = 2%)
 
 News (best-effort, may be empty):
 {news_context or ""}
 
 Output rules:
 - Return ONLY JSON matching the schema (no markdown).
-- If is_chart=false: signal MUST be NO_TRADE and set entry=null, stop_loss=null, position_size=null, take_profit=[].
-- If is_chart=true: signal MUST be LONG or SHORT, and you MUST provide entry/SL/TP levels (numbers or tight ranges) and a clear invalidation.
+- Avoid NO_TRADE unless the image is not a readable price chart.
+- If LONG/SHORT, ALWAYS provide concrete entry/SL/TP and ensure TP is the nearest opposing level (TP at nearest resistance for LONG / nearest support for SHORT) and SL is beyond the nearest protective level with a small buffer.
+- Always fill support_levels and resistance_levels (2–4 each) based on visible chart levels.
+- If LONG/SHORT, provide concrete entry/SL/TP levels (numbers or tight ranges) and a clear invalidation.
 - Provide 6–12 short bullet points in rationale (structure, levels, liquidity/price action, and the biggest risk).
-
-Position sizing rule (important):
-- Treat risk_fraction as the MAX risk for this trade.
-- Scale the used risk by confidence:
-  * confidence 50–59 -> 0.25x risk_fraction (micro)
-  * confidence 60–69 -> 0.50x risk_fraction
-  * confidence 70–79 -> 0.80x risk_fraction
-  * confidence 80–100 -> 1.00x risk_fraction
-- Do NOT output tiny position_size like "1%" unless confidence is below 60.
 """
 
     resp = client.responses.create(
@@ -717,13 +722,10 @@ Position sizing rule (important):
     result["mode"] = "SCALP" if mode_norm == "scalp" else "SWING"
 
     if sig == "NO_TRADE":
-        result["entry"] = None
-        result["stop_loss"] = None
-        result["position_size"] = None
-        result["take_profit"] = []
+        # We try hard to avoid NO_TRADE on readable charts. Do not wipe fields here;
+        # later we may force a direction using nearest support/resistance.
         if not isinstance(result.get("rationale"), list):
             result["rationale"] = [str(result.get("rationale") or "")]
-        return result
 
     # Must have entry + SL
     if result.get("entry") is None or result.get("stop_loss") is None:
@@ -736,6 +738,91 @@ Position sizing rule (important):
     if not isinstance(tps, list):
         tps = []
     tp0_n = _first_number(tps[0]) if tps else None
+
+    # Parse support/resistance levels (strings -> floats)
+    def _parse_levels(vals):
+        out_levels = []
+        if not isinstance(vals, list):
+            return out_levels
+        for v in vals:
+            n = _first_number(v)
+            if n is not None:
+                out_levels.append(float(n))
+        # de-dup and sort
+        out_levels = sorted(set(out_levels))
+        return out_levels
+
+    supports = _parse_levels(result.get("support_levels") or [])
+    resistances = _parse_levels(result.get("resistance_levels") or [])
+
+    def _nearest_below(levels, x):
+        below = [lv for lv in levels if lv < x]
+        return max(below) if below else None
+
+    def _nearest_above(levels, x):
+        above = [lv for lv in levels if lv > x]
+        return min(above) if above else None
+
+    def _fmt_level(x: float) -> str:
+        if x is None:
+            return ""
+        if abs(x - round(x)) < 1e-6:
+            return str(int(round(x)))
+        s = f"{x:.4f}".rstrip("0").rstrip(".")
+        return s
+
+    # If the model still returned NO_TRADE on a readable chart, force a direction
+    if sig == "NO_TRADE" and entry_n is not None:
+        ns = _nearest_below(supports, entry_n)
+        nr = _nearest_above(resistances, entry_n)
+        # Decide by proximity: closer to support => LONG, else SHORT
+        if ns is None and nr is None:
+            sig = "LONG"
+        elif ns is None:
+            sig = "SHORT"
+        elif nr is None:
+            sig = "LONG"
+        else:
+            sig = "LONG" if (entry_n - ns) <= (nr - entry_n) else "SHORT"
+        result["signal"] = sig
+
+    # Enforce "TP at nearest opposing level" and "SL beyond nearest protective level"
+    if entry_n is not None and sl_n is not None:
+        buffer_abs = max(entry_n * 0.0015, entry_n * 0.0005)  # ~0.15% buffer (min 0.05%)
+
+        if sig == "LONG":
+            ns = _nearest_below(supports, entry_n)
+            nr = _nearest_above(resistances, entry_n)
+            # Override TP to nearest resistance if available
+            if nr is not None:
+                result["take_profit"] = [_fmt_level(nr)]
+                tp0_n = nr
+            # Override SL to below nearest support if available
+            if ns is not None:
+                sl_new = ns - buffer_abs
+                if sl_new < entry_n:
+                    result["stop_loss"] = _fmt_level(sl_new)
+                    sl_n = sl_new
+
+        elif sig == "SHORT":
+            nr = _nearest_above(resistances, entry_n)
+            ns = _nearest_below(supports, entry_n)
+            if ns is not None:
+                result["take_profit"] = [_fmt_level(ns)]
+                tp0_n = ns
+            if nr is not None:
+                sl_new = nr + buffer_abs
+                if sl_new > entry_n:
+                    result["stop_loss"] = _fmt_level(sl_new)
+                    sl_n = sl_new
+
+    # Ensure support_levels/resistance_levels exist as lists of strings
+    if not isinstance(result.get("support_levels"), list):
+        result["support_levels"] = []
+    if not isinstance(result.get("resistance_levels"), list):
+        result["resistance_levels"] = []
+    result["support_levels"] = [str(x) for x in (result.get("support_levels") or []) if str(x).strip()]
+    result["resistance_levels"] = [str(x) for x in (result.get("resistance_levels") or []) if str(x).strip()]
 
     if sig == "LONG" and entry_n is not None and sl_n is not None:
         if sl_n >= entry_n:
@@ -758,39 +845,6 @@ Position sizing rule (important):
     if not isinstance(result.get("rationale"), list):
         result["rationale"] = [str(result.get("rationale") or "")]
     result["take_profit"] = [str(x) for x in (result.get("take_profit") or []) if str(x).strip()]
-
-    # ---- Auto position sizing (override LLM "position_size") ----
-    # Compute notional size from: risk_amount / stop_distance (in quote currency).
-    # This prevents absurdly small sizes like "1%".
-    conf = int(result.get("confidence") or 0)
-
-    if conf < 60:
-        conf_mult = 0.25
-    elif conf < 70:
-        conf_mult = 0.50
-    elif conf < 80:
-        conf_mult = 0.80
-    else:
-        conf_mult = 1.00
-
-    entry_n = _first_number(result.get("entry"))
-    sl_n = _first_number(result.get("stop_loss"))
-
-    if entry_n and sl_n and entry_n > 0:
-        stop_frac = abs(entry_n - sl_n) / entry_n  # e.g. 0.005 = 0.5%
-        stop_frac = max(stop_frac, 0.001)  # min 0.10% to avoid insane sizing on ultra-tight SL
-
-        risk_amount = float(capital) * float(risk_fraction) * conf_mult
-        notional = risk_amount / stop_frac
-
-        # Cap by a reasonable max exposure (10x leverage * 80% usage)
-        max_notional = float(capital) * 10.0 * 0.80
-        notional = min(notional, max_notional)
-
-        exposure_x = notional / float(capital) if float(capital) else 0.0
-        exposure_pct = exposure_x * 100.0
-
-        result["position_size"] = f"{notional:.0f} (≈{exposure_x:.2f}x, {exposure_pct:.0f}% capital)"
 
     return result
 
