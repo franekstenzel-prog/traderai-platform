@@ -101,7 +101,7 @@ def _column_exists(db: sqlite3.Connection, table: str, column: str) -> bool:
 
 
 def _ensure_columns(db: sqlite3.Connection) -> None:
-    # Users table may evolve over time - add missing columns safely.
+    # Users table may evolve over time — add missing columns safely.
     needed = {
         "stripe_customer_id": "TEXT",
         "stripe_subscription_id": "TEXT",
@@ -616,8 +616,8 @@ Task:
 2) If is_chart=true, you MUST return a direction: LONG or SHORT.
    - NO_TRADE is allowed ONLY when is_chart=false (unreadable / not a chart).
 3) Identify meaningful (major) horizontal levels:
-   - support_levels: 2-4 meaningful supports (swing lows / base of consolidation), not micro-noise.
-   - resistance_levels: 2-4 meaningful resistances (swing highs / top of consolidation), not micro-noise.
+   - support_levels: 2–4 meaningful supports (swing lows / base of consolidation), not micro-noise.
+   - resistance_levels: 2–4 meaningful resistances (swing highs / top of consolidation), not micro-noise.
    - major_support: the nearest *major* support relative to current price.
    - major_resistance: the nearest *major* resistance relative to current price.
 4) Build the trade using these rules (STRICT):
@@ -644,7 +644,12 @@ Output rules:
 - Return ONLY JSON matching the schema (no markdown).
 - If is_chart=false, signal MUST be NO_TRADE and entry/stop_loss/position_size must be null and take_profit=[].
 - If is_chart=true, signal MUST be LONG or SHORT and you MUST provide entry/stop_loss/take_profit.
-- Provide 6-12 short bullet points in rationale focused on S/R, structure, liquidity, and the biggest risk."""
+- Provide 6–12 short bullet points in rationale focused on S/R, structure, liquidity, and the biggest risk."""
+
+ion_size=null, take_profit=[] and explain clearly why.
+- If LONG/SHORT, provide concrete entry/SL/TP levels (numbers or tight ranges) and a clear invalidation.
+- Provide 6–12 short bullet points in rationale (structure, levels, liquidity/price action, and the biggest risk).
+"""
 
     resp = client.responses.create(
         model=OPENAI_MODEL,
@@ -1110,7 +1115,7 @@ def analyze():
     capital = _f("capital", float(user["default_capital"] or 1000))
     risk_fraction = _f("risk_fraction", float(user["default_risk_fraction"] or 0.02))
 
-    # Auto news (best-effort) - do not ask the user for it.
+    # Auto news (best-effort) — do not ask the user for it.
     news_context = auto_news_context(pair=pair, timeframe=timeframe)
 
     file = request.files.get("chart")
@@ -1456,7 +1461,7 @@ LESSONS: list[dict] = [
         "title": "Market structure in 10 minutes",
         "minutes": 10,
         "body": [
-            "Your job is not to predict - it is to react to structure.",
+            "Your job is not to predict — it is to react to structure.",
             "On any timeframe, structure is defined by swing highs/lows. Uptrend: HH/HL. Downtrend: LH/LL.",
             "The cleanest entries happen after a break of structure (BOS) and a controlled pullback into a key level.",
             "Avoid taking trades in the middle of a range. If you must trade a range, trade the edges with a tight invalidation.",
@@ -1480,8 +1485,8 @@ LESSONS: list[dict] = [
         "title": "Risk: the only thing you control",
         "minutes": 8,
         "body": [
-            "Pick a fixed risk per trade (e.g., 1-2%) and keep it constant.",
-            "Position size is a consequence of your stop distance - not the other way around.",
+            "Pick a fixed risk per trade (e.g., 1–2%) and keep it constant.",
+            "Position size is a consequence of your stop distance — not the other way around.",
             "If a setup forces a stop that is too wide for your risk, skip the trade.",
             "Never move your stop farther. You can reduce risk, not increase it mid-trade.",
         ],
@@ -1529,7 +1534,7 @@ LESSONS: list[dict] = [
         "minutes": 12,
         "body": [
             "Take profit at logical magnets: prior highs/lows, range edges, liquidity pools.",
-            "Scaling out is optional. If you scale, do it at predefined levels - not emotions.",
+            "Scaling out is optional. If you scale, do it at predefined levels — not emotions.",
             "Break-even is a tool, not a religion. Use it when structure confirms your direction.",
             "Track results in R-multiple. It keeps you honest across position sizes.",
         ],
@@ -1568,7 +1573,7 @@ def learn():
 
     # Nice descriptions
     desc = {
-        "Foundations": "Structure, levels, and risk - the non-negotiables.",
+        "Foundations": "Structure, levels, and risk — the non-negotiables.",
         "Liquidity": "Sweeps, traps, and high-probability areas.",
         "Execution": "Repeatable triggers and management rules.",
     }
@@ -2070,7 +2075,7 @@ def stripe_webhook():
     obj = event["data"]["object"]
     db = get_db()
 
-    # 1) Checkout completed - link subscription to user
+    # 1) Checkout completed — link subscription to user
     if etype == "checkout.session.completed":
         user_id = int(obj.get("metadata", {}).get("user_id", "0") or 0)
         sub_id = obj.get("subscription")
@@ -2100,7 +2105,7 @@ def stripe_webhook():
             else:
                 _apply_subscription_to_user(db, u["id"], sub)
 
-    # 3) Payment failures - keep grace until period_end if possible
+    # 3) Payment failures — keep grace until period_end if possible
     if etype in ("invoice.payment_failed", "invoice.payment_action_required"):
         customer_id = obj.get("customer")
         u = None
