@@ -46,8 +46,8 @@ except Exception:
 
 FREE_MONTHLY_LIMIT = 3
 PRO_MONTHLY_LIMIT = None  # unlimited
-PRO_PRICE_MONTHLY_PLN = 19
-PRO_PRICE_YEARLY_PLN = 99  # -10%
+PRO_PRICE_MONTHLY_PLN = 99
+PRO_PRICE_YEARLY_PLN = int(round(12 * PRO_PRICE_MONTHLY_PLN * 0.9))  # -10%
 
 SECRET_KEY = os.environ.get("SECRET_KEY") or "dev-secret-change-me"
 
@@ -633,6 +633,9 @@ Task:
    - If the edge is weak or structure is messy, do NOT output NO_TRADE. Instead produce a LOW-EDGE trade using the nearest support/resistance.
 
 Support/Resistance rule (MANDATORY):
+- IMPORTANT: levels must be MEANINGFUL (swing highs/lows, consolidation boundaries). Do NOT use tiny micro-levels a few dollars away.
+- IMPORTANT: nearest resistance/support should normally be at least ~1% away from current price for SWING, unless the chart is very tight-range.
+
 - Extract 2–4 nearest SUPPORT levels below current price and 2–4 nearest RESISTANCE levels above current price visible on the chart.
 - Populate support_levels and resistance_levels with those prices (strings like "1975" or "1975.5").
 - If signal=LONG:
@@ -763,6 +766,27 @@ Output rules:
         above = [lv for lv in levels if lv > x]
         return min(above) if above else None
 
+    def _pick_tp_above(levels, x, min_dist_frac):
+        # pick nearest level above x that is at least min_dist_frac away; otherwise fall back to the farthest provided level
+        above = sorted([lv for lv in levels if lv > x])
+        if not above:
+            return None
+        for lv in above:
+            if (lv - x) / x >= min_dist_frac:
+                return lv
+        return above[-1]
+
+    def _pick_tp_below(levels, x, min_dist_frac):
+        below = sorted([lv for lv in levels if lv < x])
+        if not below:
+            return None
+        below = below[::-1]  # descending
+        for lv in below:
+            if (x - lv) / x >= min_dist_frac:
+                return lv
+        return below[-1]
+
+
     def _fmt_level(x: float) -> str:
         if x is None:
             return ""
@@ -788,12 +812,16 @@ Output rules:
 
     # Enforce "TP at nearest opposing level" and "SL beyond nearest protective level"
     if entry_n is not None and sl_n is not None:
-        buffer_abs = max(entry_n * 0.0015, entry_n * 0.0005)  # ~0.15% buffer (min 0.05%)
+        buffer_abs = max(entry_n * 0.0015, entry_n * 0.0005)
+
+        # Minimum TP distance to avoid micro 'noise' levels
+        min_tp_dist_frac = 0.005 if mode_norm == "scalp" else 0.015  # 0.5% scalp, 1.5% swing
+  # ~0.15% buffer (min 0.05%)
 
         if sig == "LONG":
             ns = _nearest_below(supports, entry_n)
-            nr = _nearest_above(resistances, entry_n)
-            # Override TP to nearest resistance if available
+            nr = _pick_tp_above(resistances, entry_n, min_tp_dist_frac)
+            # Override TP to meaningful resistance (avoid micro levels)
             if nr is not None:
                 result["take_profit"] = [_fmt_level(nr)]
                 tp0_n = nr
@@ -808,8 +836,11 @@ Output rules:
             nr = _nearest_above(resistances, entry_n)
             ns = _nearest_below(supports, entry_n)
             if ns is not None:
-                result["take_profit"] = [_fmt_level(ns)]
-                tp0_n = ns
+                # pick meaningful TP (avoid micro levels)
+                tp_sel = _pick_tp_below(supports, entry_n, min_tp_dist_frac)
+                if tp_sel is not None:
+                    result["take_profit"] = [_fmt_level(tp_sel)]
+                    tp0_n = tp_sel
             if nr is not None:
                 sl_new = nr + buffer_abs
                 if sl_new > entry_n:
