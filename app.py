@@ -1601,18 +1601,41 @@ def analyze():
     db.commit()
 
     try:
-        # NOTE: Engine switched to deterministic mechanical logic.
-        # We keep the chart upload flow unchanged (for UI consistency), but the
-        # decision-making comes from OHLC market data, not the screenshot.
-        result = analyze_with_mechanical_engine(
-            pair=pair,
-            timeframe=timeframe,
-            capital=capital,
-            risk_fraction=risk_fraction,
-            mode=mode,
-            news_context=news_context,
-        )
-    except Exception as e:
+        # Screen-first engine (product rule):
+        # - If the uploaded image is a readable candlestick chart (is_chart=true), we ALWAYS return LONG or SHORT.
+        # - We allow NO_TRADE only when the screenshot is NOT a readable chart (is_chart=false).
+        #
+        # We still keep the chart upload flow unchanged (UI consistency), but we now use the screenshot
+        # as the primary source of structure/levels for ALL instruments (including GOLD on XTB).
+        try:
+            result = analyze_with_openai_pro(
+                image_bytes=image_bytes,
+                image_mime=image_mime,
+                pair=pair,
+                timeframe=timeframe,
+                capital=capital,
+                risk_fraction=risk_fraction,
+                mode=mode,
+                news_context=news_context,
+            )
+        except Exception as openai_err:
+            # Fallback: deterministic OHLC engine (works only for instruments supported by Binance).
+            result = analyze_with_mechanical_engine(
+                pair=pair,
+                timeframe=timeframe,
+                capital=capital,
+                risk_fraction=risk_fraction,
+                mode=mode,
+                news_context=news_context,
+            )
+            # If OHLC engine couldn't fetch data but we DO have a screenshot, do not return NO_TRADE
+            # unless the screenshot itself is unreadable. Try screenshot engine again (if possible).
+            if isinstance(result, dict) and result.get("signal") == "NO_TRADE":
+                # Best-effort: surface the original OpenAI error for debugging in issues.
+                issues = result.get("issues") or []
+                issues.append(f"OpenAI engine error: {openai_err}")
+                result["issues"] = issues
+except Exception as e:
         flash(f"Analysis failed: {e}", "error")
         return redirect(url_for("analyze_page"))
 
