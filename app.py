@@ -539,6 +539,384 @@ def auto_news_context(pair: str, timeframe: str = "") -> str:
 
 
 # -----------------------------
+# Mechanical engine (deterministic, OHLC-based)
+# -----------------------------
+
+_BINANCE_INTERVAL_MAP = {
+    "1M": "1m",
+    "3M": "3m",
+    "5M": "5m",
+    "15M": "15m",
+    "30M": "30m",
+    "1H": "1h",
+    "2H": "2h",
+    "4H": "4h",
+    "6H": "6h",
+    "8H": "8h",
+    "12H": "12h",
+    "1D": "1d",
+    "3D": "3d",
+    "1W": "1w",
+}
+
+
+def _binance_interval(tf: str) -> str:
+    tf = (tf or "").upper().strip()
+    return _BINANCE_INTERVAL_MAP.get(tf, "1h")
+
+
+def _fetch_binance_klines(symbol: str, timeframe: str, limit: int = 300):
+    """Fetch klines from Binance spot public API (best-effort)."""
+    interval = _binance_interval(timeframe)
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={int(limit)}"
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    raw = urlopen(req, timeout=10).read().decode("utf-8")
+    data = json.loads(raw)
+    if not isinstance(data, list) or not data:
+        raise RuntimeError("Binance returned empty klines.")
+
+    # kline: [open_time, open, high, low, close, volume, close_time, ...]
+    o = [float(x[1]) for x in data]
+    h = [float(x[2]) for x in data]
+    l = [float(x[3]) for x in data]
+    c = [float(x[4]) for x in data]
+    return o, h, l, c
+
+
+def _ema(values: list[float], period: int) -> list[float]:
+    if not values:
+        return []
+    if period <= 1:
+        return values[:]
+    k = 2 / (period + 1)
+    out = [float(values[0])]
+    for i in range(1, len(values)):
+        out.append(float(values[i]) * k + out[-1] * (1 - k))
+    return out
+
+
+def _atr(high: list[float], low: list[float], close: list[float], period: int = 14) -> list[float]:
+    if len(close) < 2:
+        return [0.0 for _ in close]
+    tr = [0.0]
+    for i in range(1, len(close)):
+        tr_i = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1]),
+        )
+        tr.append(float(tr_i))
+    return _ema(tr, period)
+
+
+def _swing_points(high: list[float], low: list[float], left: int = 2, right: int = 2):
+    """Simple fractal swings."""
+    sh: list[tuple[int, float]] = []
+    sl: list[tuple[int, float]] = []
+    n = len(high)
+    if n < left + right + 5:
+        return sh, sl
+    for i in range(left, n - right):
+        hh = high[i]
+        ll = low[i]
+        if all(hh > high[i - k] for k in range(1, left + 1)) and all(
+            hh > high[i + k] for k in range(1, right + 1)
+        ):
+            sh.append((i, float(hh)))
+        if all(ll < low[i - k] for k in range(1, left + 1)) and all(
+            ll < low[i + k] for k in range(1, right + 1)
+        ):
+            sl.append((i, float(ll)))
+    return sh, sl
+
+
+def _fmt_level(x: Optional[float]) -> Optional[str]:
+    if x is None:
+        return None
+    if abs(x - round(x)) < 1e-8:
+        return str(int(round(x)))
+    return f"{x:.8f}".rstrip("0").rstrip(".")
+
+
+def _safe_no_trade(
+    pair: str,
+    timeframe: str,
+    mode_norm: str,
+    risk_fraction: float,
+    reason: str,
+    issues: Optional[list[str]] = None,
+    rationale: Optional[list[str]] = None,
+    confidence: int = 25,
+    supports: Optional[list[float]] = None,
+    resistances: Optional[list[float]] = None,
+    news_context: str = "",
+) -> dict:
+    sup = [str(_fmt_level(x)) for x in (supports or []) if x is not None][:4]
+    res = [str(_fmt_level(x)) for x in (resistances or []) if x is not None][:4]
+    news_summary = (news_context or "")[:500]
+    return {
+        "pair": pair,
+        "timeframe": timeframe,
+        "mode": "SCALP" if mode_norm == "scalp" else "SWING",
+        "is_chart": True,
+        "signal": "NO_TRADE",
+        "confidence": int(max(0, min(100, confidence))),
+        "setup": reason,
+        "entry": None,
+        "stop_loss": None,
+        "take_profit": [],
+        "support_levels": sup,
+        "resistance_levels": res,
+        "position_size": None,
+        "risk": str(risk_fraction),
+        "invalidation": "N/A",
+        "issues": issues or [],
+        "rationale": rationale or [],
+        "news": {
+            "mode": "auto" if bool(news_context) else "not_provided",
+            "impact": "UNKNOWN",
+            "summary": news_summary,
+            "key_points": [],
+        },
+        "explanation": "Mechanical engine output (deterministic).",
+    }
+
+
+def analyze_with_mechanical_engine(
+    pair: str,
+    timeframe: str,
+    capital: float,
+    risk_fraction: float,
+    mode: str,
+    news_context: str = "",
+) -> dict:
+    """Deterministic signal: EMA10/EMA18 + BOS on fractal swings + ATR buffer."""
+
+    mode_norm = (mode or "").strip().lower()
+    if mode_norm not in ("scalp", "swing"):
+        mode_norm = "swing"
+
+    try:
+        _o, h, l, c = _fetch_binance_klines(pair, timeframe, limit=300)
+    except Exception as e:
+        return _safe_no_trade(
+            pair=pair,
+            timeframe=timeframe,
+            mode_norm=mode_norm,
+            risk_fraction=risk_fraction,
+            reason="NO_TRADE: market data unavailable.",
+            issues=[f"Binance klines error: {e}"],
+            rationale=["Mechanical engine requires OHLC data."],
+            confidence=20,
+            news_context=news_context,
+        )
+
+    if len(c) < 60:
+        return _safe_no_trade(
+            pair,
+            timeframe,
+            mode_norm,
+            risk_fraction,
+            "NO_TRADE: not enough candles.",
+            issues=["Less than 60 candles returned."],
+            confidence=22,
+            news_context=news_context,
+        )
+
+    ema_fast = _ema(c, 10)
+    ema_slow = _ema(c, 18)
+    atr14 = _atr(h, l, c, 14)
+
+    sh, sl = _swing_points(h, l, left=2, right=2)
+
+    last_close = float(c[-1])
+    last_atr = float(atr14[-1] or 0.0)
+    buffer_abs = max(last_atr * 0.20, last_close * (0.0012 if mode_norm == "scalp" else 0.0020))
+
+    swing_highs = [p for _i, p in sh]
+    swing_lows = [p for _i, p in sl]
+    supports_below = sorted([p for p in swing_lows if p < last_close], reverse=True)
+    resists_above = sorted([p for p in swing_highs if p > last_close])
+
+    if len(sh) < 3 or len(sl) < 3:
+        return _safe_no_trade(
+            pair,
+            timeframe,
+            mode_norm,
+            risk_fraction,
+            "NO_TRADE: insufficient market structure (swings).",
+            issues=["Not enough swing highs/lows for BOS logic."],
+            rationale=["Wait until clearer swing structure forms."],
+            confidence=28,
+            supports=supports_below[:4],
+            resistances=resists_above[:4],
+            news_context=news_context,
+        )
+
+    last_swing_high = float(sh[-1][1])
+    last_swing_low = float(sl[-1][1])
+
+    trend_up = ema_fast[-1] > ema_slow[-1]
+    trend_down = ema_fast[-1] < ema_slow[-1]
+
+    bos_long = last_close > last_swing_high
+    bos_short = last_close < last_swing_low
+
+    rr_min = 1.2 if mode_norm == "scalp" else 2.2
+
+    issues: list[str] = []
+    atr_frac = (last_atr / last_close) if last_close else 0.0
+    if mode_norm == "swing" and atr_frac < 0.002:
+        issues.append("ATR too small: low volatility / tight range.")
+    if mode_norm == "scalp" and atr_frac < 0.0008:
+        issues.append("ATR too small: scalp edge likely poor.")
+
+    if not ((trend_up and bos_long and supports_below) or (trend_down and bos_short and resists_above)):
+        rationale = [
+            "No-trade because strict conditions were not met.",
+            "Mechanical rules require BOTH: (1) trend alignment (EMA10 vs EMA18) and (2) BOS on structure.",
+            f"trend_up={trend_up}, trend_down={trend_down}, bos_long={bos_long}, bos_short={bos_short}",
+        ]
+        return _safe_no_trade(
+            pair,
+            timeframe,
+            mode_norm,
+            risk_fraction,
+            "NO_TRADE: no trend+BOS alignment.",
+            issues=issues,
+            rationale=rationale,
+            confidence=33,
+            supports=supports_below[:4],
+            resistances=resists_above[:4],
+            news_context=news_context,
+        )
+
+    if trend_up and bos_long and supports_below:
+        signal = "LONG"
+        entry = last_close
+        sl_struct = float(supports_below[0])
+        sl_price = sl_struct - buffer_abs
+        R = entry - sl_price
+        if R <= 0:
+            return _safe_no_trade(
+                pair,
+                timeframe,
+                mode_norm,
+                risk_fraction,
+                "NO_TRADE: invalid risk geometry (LONG).",
+                issues=["Computed SL is not below entry."],
+                supports=supports_below[:4],
+                resistances=resists_above[:4],
+                news_context=news_context,
+            )
+        tp_rr = entry + rr_min * R
+        tp_struct = float(resists_above[0]) if resists_above else None
+        tp_price = max(tp_rr, tp_struct) if tp_struct is not None else tp_rr
+        confidence = 64 if mode_norm == "swing" else 58
+        setup = "EMA10>EMA18 + BOS above swing-high."
+        rationale = [
+            "Trend filter: EMA10 above EMA18.",
+            "Trigger: close broke above most recent swing-high (BOS).",
+            "SL beyond nearest swing-low/support with ATR buffer.",
+            "TP respects minimum RR and nearest resistance if present.",
+        ]
+
+    else:
+        signal = "SHORT"
+        entry = last_close
+        sl_struct = float(resists_above[0])
+        sl_price = sl_struct + buffer_abs
+        R = sl_price - entry
+        if R <= 0:
+            return _safe_no_trade(
+                pair,
+                timeframe,
+                mode_norm,
+                risk_fraction,
+                "NO_TRADE: invalid risk geometry (SHORT).",
+                issues=["Computed SL is not above entry."],
+                supports=supports_below[:4],
+                resistances=resists_above[:4],
+                news_context=news_context,
+            )
+        tp_rr = entry - rr_min * R
+        tp_struct = float(supports_below[0]) if supports_below else None
+        tp_price = min(tp_rr, tp_struct) if tp_struct is not None else tp_rr
+        confidence = 64 if mode_norm == "swing" else 58
+        setup = "EMA10<EMA18 + BOS below swing-low."
+        rationale = [
+            "Trend filter: EMA10 below EMA18.",
+            "Trigger: close broke below most recent swing-low (BOS).",
+            "SL beyond nearest swing-high/resistance with ATR buffer.",
+            "TP respects minimum RR and nearest support if present.",
+        ]
+
+    if signal == "LONG" and sl_price >= entry:
+        return _safe_no_trade(
+            pair,
+            timeframe,
+            mode_norm,
+            risk_fraction,
+            "NO_TRADE: inconsistent levels (LONG).",
+            issues=["SL not below entry."],
+            supports=supports_below[:4],
+            resistances=resists_above[:4],
+            news_context=news_context,
+        )
+    if signal == "SHORT" and sl_price <= entry:
+        return _safe_no_trade(
+            pair,
+            timeframe,
+            mode_norm,
+            risk_fraction,
+            "NO_TRADE: inconsistent levels (SHORT).",
+            issues=["SL not above entry."],
+            supports=supports_below[:4],
+            resistances=resists_above[:4],
+            news_context=news_context,
+        )
+
+    position_size = None
+    stop_distance = abs(entry - sl_price)
+    if stop_distance > 0:
+        risk_amount = float(capital) * float(risk_fraction)
+        notional = risk_amount / stop_distance
+        max_notional = float(capital) * 8
+        notional = min(notional, max_notional)
+        if notional > 0:
+            position_size = notional
+
+    news_summary = (news_context or "")[:500]
+
+    return {
+        "pair": pair,
+        "timeframe": timeframe,
+        "mode": "SCALP" if mode_norm == "scalp" else "SWING",
+        "is_chart": True,
+        "signal": signal,
+        "confidence": int(confidence),
+        "setup": setup,
+        "entry": _fmt_level(entry),
+        "stop_loss": _fmt_level(sl_price),
+        "take_profit": [_fmt_level(tp_price)] if tp_price is not None else [],
+        "support_levels": [str(_fmt_level(x)) for x in supports_below[:4]],
+        "resistance_levels": [str(_fmt_level(x)) for x in resists_above[:4]],
+        "position_size": _fmt_level(position_size) if position_size is not None else None,
+        "risk": str(risk_fraction),
+        "invalidation": "BOS invalidated (price closes back across the broken swing).",
+        "issues": issues,
+        "rationale": rationale,
+        "news": {
+            "mode": "auto" if bool(news_context) else "not_provided",
+            "impact": "UNKNOWN",
+            "summary": news_summary,
+            "key_points": [],
+        },
+        "explanation": "Mechanical engine output (EMA10/EMA18 + BOS + ATR buffer).",
+    }
+
+
+# -----------------------------
 # OpenAI: chart analysis (v2.6 PRO, English output)
 # -----------------------------
 def analyze_with_openai_pro(
@@ -551,7 +929,19 @@ def analyze_with_openai_pro(
     mode: str,
     news_context: str = "",
 ) -> dict:
-    """English, concise instruction set with permissive NO_TRADE."""
+    """
+    Screen-first trading plan.
+
+    Product rule:
+    - If is_chart=true (readable candles + price scale), ALWAYS output LONG or SHORT.
+    - No NO_TRADE for readable charts. If edge is low, still return a conservative, level-based plan.
+
+    Priority (must be reflected in outputs):
+    1) Swing highs/lows (HH/HL/LH/LL) + break & retest of key levels
+    2) Support/Resistance (levels derived from those swings / ranges)
+    3) Liquidity as SL placement refinement
+    4) Candle patterns ONLY as confirmation at levels
+    """
 
     if not OPENAI_API_KEY:
         raise RuntimeError("Missing OPENAI_API_KEY environment variable.")
@@ -566,6 +956,24 @@ def analyze_with_openai_pro(
     if mode_norm not in ("scalp", "swing"):
         mode_norm = "swing"
 
+    # --- instrument profiles (minimal, safe defaults) ---
+    pair_u = (pair or "").upper().strip()
+    is_gold = pair_u in ("GOLD", "XAUUSD", "XAUUSD.M", "XAUUSDm")
+
+    # For GOLD (XTB), we want: entry can be micro level, TP must be a real swing level.
+    if is_gold and mode_norm == "swing":
+        min_tp_frac = 0.0040  # 0.40%
+        buf_frac = 0.0010     # 0.10% buffer beyond level
+        rr_min = 1.8
+    elif is_gold and mode_norm == "scalp":
+        min_tp_frac = 0.0015  # 0.15%
+        buf_frac = 0.0007
+        rr_min = 1.2
+    else:
+        min_tp_frac = 0.0060 if mode_norm == "swing" else 0.0020
+        buf_frac = 0.0010 if mode_norm == "swing" else 0.0007
+        rr_min = 2.0 if mode_norm == "swing" else 1.2
+
     schema = {
         "type": "object",
         "additionalProperties": False,
@@ -577,11 +985,44 @@ def analyze_with_openai_pro(
             "signal": {"type": "string", "enum": ["LONG", "SHORT", "NO_TRADE"]},
             "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
             "setup": {"type": "string"},
+            "current_price": {"type": ["string", "null"]},
             "entry": {"type": ["string", "null"]},
             "stop_loss": {"type": ["string", "null"]},
             "take_profit": {"type": "array", "items": {"type": "string"}},
             "support_levels": {"type": "array", "items": {"type": "string"}},
             "resistance_levels": {"type": "array", "items": {"type": "string"}},
+            "last_swing_high": {"type": ["string", "null"]},
+            "last_swing_low": {"type": ["string", "null"]},
+            "patterns": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "bos_up": {"type": "boolean"},
+                    "bos_down": {"type": "boolean"},
+                    "break_retest_long": {"type": "boolean"},
+                    "break_retest_short": {"type": "boolean"},
+                    "rejection_at_support": {"type": "boolean"},
+                    "rejection_at_resistance": {"type": "boolean"},
+                    "bullish_engulfing": {"type": "boolean"},
+                    "bearish_engulfing": {"type": "boolean"},
+                    "pinbar_bull": {"type": "boolean"},
+                    "pinbar_bear": {"type": "boolean"},
+                    "inside_bar": {"type": "boolean"},
+                },
+                "required": [
+                    "bos_up",
+                    "bos_down",
+                    "break_retest_long",
+                    "break_retest_short",
+                    "rejection_at_support",
+                    "rejection_at_resistance",
+                    "bullish_engulfing",
+                    "bearish_engulfing",
+                    "pinbar_bull",
+                    "pinbar_bear",
+                    "inside_bar",
+                ],
+            },
             "position_size": {"type": ["string", "null"]},
             "risk": {"type": "string"},
             "invalidation": {"type": "string"},
@@ -608,11 +1049,15 @@ def analyze_with_openai_pro(
             "signal",
             "confidence",
             "setup",
+            "current_price",
             "entry",
             "stop_loss",
             "take_profit",
             "support_levels",
             "resistance_levels",
+            "last_swing_high",
+            "last_swing_low",
+            "patterns",
             "position_size",
             "risk",
             "invalidation",
@@ -624,46 +1069,45 @@ def analyze_with_openai_pro(
     }
 
     instruction = f"""
-You are a professional trading analyst.
+You are a professional discretionary trader, but your output must be MECHANICAL and level-driven.
 
-Task:
-1) First decide whether the image contains a readable price chart screenshot. Set is_chart=false if it is NOT a chart, or if prices/timeframe are not readable.
-2) If is_chart=true, you MUST return a direction: LONG or SHORT.
-   - NO_TRADE is allowed ONLY if the image is not a readable price chart (candles/price scale/timeframe not readable).
-   - If the edge is weak or structure is messy, do NOT output NO_TRADE. Instead produce a LOW-EDGE trade using the nearest support/resistance.
+HARD RULES:
+- First detect if this is a readable candlestick price chart with a visible price scale. If not readable, set is_chart=false.
+- If is_chart=true you MUST output signal LONG or SHORT (never NO_TRADE).
+- The most important thing is SWING HIGHS/LOWS and SUPPORT/RESISTANCE derived from them.
+- Entry MUST be placed at/near a support (for LONG) or resistance (for SHORT). Micro-levels are allowed for ENTRY/SL.
+- Take-profit MUST be placed at the NEXT meaningful opposing swing level (not a random far number, not an arbitrary RR).
+- Candle patterns (engulfing/pinbar/inside bar) are only CONFIRMATION at a level, not the primary signal.
 
-Support/Resistance rule (MANDATORY):
-- IMPORTANT: levels must be MEANINGFUL (swing highs/lows, consolidation boundaries). Do NOT use tiny micro-levels a few dollars away.
-- IMPORTANT: nearest resistance/support should normally be at least ~1% away from current price for SWING, unless the chart is very tight-range.
+What to extract from the chart:
+1) current_price (last traded/last candle close visible)
+2) last_swing_high and last_swing_low (most recent clear swing points)
+3) 2–4 support levels below current_price and 2–4 resistance levels above current_price
+   - include BOTH major and minor levels, but ensure at least 1 major swing level each side if visible.
+4) Detect these boolean pattern flags (best-effort, based on the last ~10 candles):
+   - bos_up / bos_down (break of structure)
+   - break_retest_long / break_retest_short (breakout + retest of a key level or trendline)
+   - rejection_at_support / rejection_at_resistance
+   - bullish/bearish engulfing, bull/bear pinbar, inside_bar
 
-- Extract 2–4 nearest SUPPORT levels below current price and 2–4 nearest RESISTANCE levels above current price visible on the chart.
-- Populate support_levels and resistance_levels with those prices (strings like "1975" or "1975.5").
-- If signal=LONG:
-  * Entry: near current price or near nearest support (tight range allowed)
-  * Stop-loss: below the nearest support (not just under a local wick; beyond liquidity) with a small buffer
-  * Take-profit: at the nearest resistance above entry (first clear resistance)
-- If signal=SHORT:
-  * Entry: near current price or near nearest resistance
-  * Stop-loss: above the nearest resistance with a small buffer
-  * Take-profit: at the nearest support below entry (first clear support)
+Direction selection logic (priority):
+- If break_retest_short=true -> signal=SHORT.
+- Else if break_retest_long=true -> signal=LONG.
+- Else if bos_down=true and rejection_at_resistance=true -> SHORT.
+- Else if bos_up=true and rejection_at_support=true -> LONG.
+- Else choose the side that has clearer nearby level interaction.
 
 Context:
 - Pair: {pair}
 - Timeframe: {timeframe}
-- Mode: {mode_norm.upper()} (SCALP = tighter SL/TP, quicker invalidation; SWING = wider structure-based levels)
+- Mode: {mode_norm.upper()}
 - Capital: {capital}
-- Risk per trade: {risk_fraction} (fraction of capital, e.g. 0.02 = 2%)
-
-News (best-effort, may be empty):
+- Risk fraction: {risk_fraction}
+News context (best-effort):
 {news_context or ""}
 
-Output rules:
-- Return ONLY JSON matching the schema (no markdown).
-- Avoid NO_TRADE unless the image is not a readable price chart.
-- If LONG/SHORT, ALWAYS provide concrete entry/SL/TP and ensure TP is the nearest opposing level (TP at nearest resistance for LONG / nearest support for SHORT) and SL is beyond the nearest protective level with a small buffer.
-- Always fill support_levels and resistance_levels (2–4 each) based on visible chart levels.
-- If LONG/SHORT, provide concrete entry/SL/TP levels (numbers or tight ranges) and a clear invalidation.
-- Provide 6–12 short bullet points in rationale (structure, levels, liquidity/price action, and the biggest risk).
+Output:
+- Return ONLY JSON following the schema (no markdown).
 """
 
     resp = client.responses.create(
@@ -686,10 +1130,14 @@ Output rules:
             }
         },
     )
+
     out = (resp.output_text or "").strip()
     result = json.loads(out)
 
-    # Post-validation (keep it safe + consistent)
+    # ---------------------------
+    # HARD POST-PROCESSING LAYER
+    # ---------------------------
+
     def _first_number(val: object) -> Optional[float]:
         if val is None:
             return None
@@ -702,47 +1150,13 @@ Output rules:
         except Exception:
             return None
 
-    def _force_no_trade(reason: str, max_conf: int = 55):
-        result["signal"] = "NO_TRADE"
-        result["setup"] = reason
-        result["confidence"] = min(int(result.get("confidence") or 0), max_conf)
-        result["entry"] = None
-        result["stop_loss"] = None
-        result["position_size"] = None
-        result["take_profit"] = []
+    def _fmt_level(x: Optional[float]) -> Optional[str]:
+        if x is None:
+            return None
+        if abs(x - round(x)) < 1e-6:
+            return str(int(round(x)))
+        return f"{x:.4f}".rstrip("0").rstrip(".")
 
-    if not bool(result.get("is_chart")):
-        _force_no_trade("NO_TRADE: not a readable price chart screenshot.", max_conf=25)
-        return result
-
-    sig = str(result.get("signal") or "NO_TRADE").upper()
-    if sig not in ("LONG", "SHORT", "NO_TRADE"):
-        _force_no_trade("NO_TRADE: invalid signal.")
-        return result
-    result["signal"] = sig
-
-    # Normalize mode field
-    result["mode"] = "SCALP" if mode_norm == "scalp" else "SWING"
-
-    if sig == "NO_TRADE":
-        # We try hard to avoid NO_TRADE on readable charts. Do not wipe fields here;
-        # later we may force a direction using nearest support/resistance.
-        if not isinstance(result.get("rationale"), list):
-            result["rationale"] = [str(result.get("rationale") or "")]
-
-    # Must have entry + SL
-    if result.get("entry") is None or result.get("stop_loss") is None:
-        _force_no_trade("NO_TRADE: missing entry or stop-loss.")
-        return result
-
-    entry_n = _first_number(result.get("entry"))
-    sl_n = _first_number(result.get("stop_loss"))
-    tps = result.get("take_profit") or []
-    if not isinstance(tps, list):
-        tps = []
-    tp0_n = _first_number(tps[0]) if tps else None
-
-    # Parse support/resistance levels (strings -> floats)
     def _parse_levels(vals):
         out_levels = []
         if not isinstance(vals, list):
@@ -751,14 +1165,8 @@ Output rules:
             n = _first_number(v)
             if n is not None:
                 out_levels.append(float(n))
-        # de-dup and sort
-        out_levels = sorted(set(out_levels))
-        return out_levels
+        return sorted(set(out_levels))
 
-    supports = _parse_levels(result.get("support_levels") or [])
-    resistances = _parse_levels(result.get("resistance_levels") or [])
-
-    
     def _nearest_below(levels, x):
         below = [lv for lv in levels if lv < x]
         return max(below) if below else None
@@ -767,183 +1175,148 @@ Output rules:
         above = [lv for lv in levels if lv > x]
         return min(above) if above else None
 
-    def _fmt_level(x: float) -> str:
-        if x is None:
-            return ""
-        if abs(x - round(x)) < 1e-6:
-            return str(int(round(x)))
-        s = f"{x:.4f}".rstrip("0").rstrip(".")
-        return s
+    def _meaningful_above(levels, x, min_frac):
+        above = sorted([lv for lv in levels if lv > x])
+        if not above:
+            return None
+        for lv in above:
+            if (lv - x) / x >= min_frac:
+                return lv
+        return above[-1]
 
-    # --- Entry/TP selection helpers (structure + S/R first) ---
-    # User requirement:
-    # - Entry should be AT/UNDER support for LONG, AT/ABOVE resistance for SHORT (micro levels allowed).
-    # - TP should be on meaningful opposing S/R (skip micro noise), ideally meeting minimum RR.
+    def _meaningful_below(levels, x, min_frac):
+        below = sorted([lv for lv in levels if lv < x], reverse=True)
+        if not below:
+            return None
+        for lv in below:
+            if (x - lv) / x >= min_frac:
+                return lv
+        return below[-1]
 
-    def _instrument_profile(sym: str, tf: str, mode_norm: str):
-        s = (sym or "").upper()
-        tfu = (tf or "").upper()
-        # Defaults (reasonable, not perfect; safe for most)
-        rr_min = 1.2 if mode_norm == "scalp" else 2.0
-        min_tp_frac = 0.0020 if mode_norm == "scalp" else 0.0080  # 0.20% scalp, 0.80% swing
-        buffer_frac = 0.0010 if mode_norm == "scalp" else 0.0015  # 0.10% / 0.15%
+    # If not a chart => NO_TRADE (only allowed case)
+    if not bool(result.get("is_chart")):
+        result["signal"] = "NO_TRADE"
+        result["setup"] = "NO_TRADE: not a readable price chart screenshot."
+        result["entry"] = None
+        result["stop_loss"] = None
+        result["take_profit"] = []
+        result["position_size"] = None
+        return result
 
-        # XTB GOLD/XAUUSD specifics (chart from XTB; avoid tiny TP)
-        if s in ("GOLD", "XAUUSD", "XAUUSD.", "XAUUSD#") or "XAU" in s:
-            rr_min = 1.2 if mode_norm == "scalp" else 2.0
-            # H1+ tends to need more breathing room; avoid tiny “first touch” TP.
-            if tfu in ("1H", "H1", "60", "60M"):
-                min_tp_frac = 0.0025 if mode_norm == "scalp" else 0.0060  # 0.25% scalp, 0.60% swing
+    # Normalize
+    result["mode"] = "SCALP" if mode_norm == "scalp" else "SWING"
+
+    supports = _parse_levels(result.get("support_levels") or [])
+    resistances = _parse_levels(result.get("resistance_levels") or [])
+
+    cp = _first_number(result.get("current_price")) or _first_number(result.get("entry"))
+    if cp is None:
+        # last resort: try swing points
+        cp = _first_number(result.get("last_swing_high")) or _first_number(result.get("last_swing_low"))
+
+    # patterns
+    patterns = result.get("patterns") or {}
+    def _p(name: str) -> bool:
+        try:
+            return bool(patterns.get(name))
+        except Exception:
+            return False
+
+    # ---------------------------
+    # 1) Decide SIGNAL (forced)
+    # ---------------------------
+    sig = str(result.get("signal") or "").upper()
+    if sig not in ("LONG", "SHORT"):
+        sig = "LONG"
+
+    # Force by priority rules
+    if _p("break_retest_short"):
+        sig = "SHORT"
+    elif _p("break_retest_long"):
+        sig = "LONG"
+    elif _p("bos_down") and _p("rejection_at_resistance"):
+        sig = "SHORT"
+    elif _p("bos_up") and _p("rejection_at_support"):
+        sig = "LONG"
+    else:
+        # fallback by proximity to nearest S/R around current price
+        if cp is not None:
+            ns = _nearest_below(supports, cp)
+            nr = _nearest_above(resistances, cp)
+            if ns is None and nr is None:
+                sig = sig or "LONG"
+            elif ns is None:
+                sig = "SHORT"
+            elif nr is None:
+                sig = "LONG"
             else:
-                min_tp_frac = 0.0020 if mode_norm == "scalp" else 0.0050
-            buffer_frac = 0.0012 if mode_norm == "scalp" else 0.0018
+                sig = "SHORT" if (nr - cp) <= (cp - ns) else "LONG"
 
-        return rr_min, min_tp_frac, buffer_frac
+    result["signal"] = sig
 
-    def _pick_entry_long(entry_guess: float, supports: list[float]) -> Optional[float]:
-        if entry_guess is None:
-            return None
-        ns = _nearest_below(supports, entry_guess)
-        # If there is a support below current price, enter at/just above it (limit at support).
-        return ns if ns is not None else entry_guess
-
-    def _pick_entry_short(entry_guess: float, resistances: list[float]) -> Optional[float]:
-        if entry_guess is None:
-            return None
-        nr = _nearest_above(resistances, entry_guess)
-        return nr if nr is not None else entry_guess
-
-    def _pick_tp_levels_long(entry: float, sl: float, resistances: list[float], rr_min: float, min_tp_frac: float):
-        if entry is None or sl is None or sl >= entry:
-            return []
-        R = entry - sl
-        tp_rr = entry + rr_min * R
-
-        cands = sorted([r for r in resistances if r is not None and r > entry])
-        min_price = entry * (1 + min_tp_frac)
-
-        # TP1: first resistance that is far enough AND meets RR target
-        tp1 = None
-        for r in cands:
-            if r >= min_price and r >= tp_rr:
-                tp1 = r
-                break
-
-        # If none meets both, take the first "far enough" level; if still none, RR-based.
-        if tp1 is None:
-            far = [r for r in cands if r >= min_price]
-            tp1 = far[0] if far else tp_rr
-            # ensure RR at least
-            tp1 = max(tp1, tp_rr)
-
-        # TP2: next resistance above TP1; else extension.
-        tp2 = None
-        for r in cands:
-            if r > tp1:
-                tp2 = r
-                break
-        if tp2 is None:
-            tp2 = tp1 + 0.75 * (tp1 - entry)
-
-        return [tp1, tp2]
-
-    def _pick_tp_levels_short(entry: float, sl: float, supports: list[float], rr_min: float, min_tp_frac: float):
-        if entry is None or sl is None or sl <= entry:
-            return []
-        R = sl - entry
-        tp_rr = entry - rr_min * R
-
-        cands = sorted([s for s in supports if s is not None and s < entry], reverse=True)
-        max_price = entry * (1 - min_tp_frac)
-
-        tp1 = None
-        for s in cands:
-            if s <= max_price and s <= tp_rr:
-                tp1 = s
-                break
-
-        if tp1 is None:
-            far = [s for s in cands if s <= max_price]
-            tp1 = far[0] if far else tp_rr
-            tp1 = min(tp1, tp_rr)
-
-        tp2 = None
-        for s in cands:
-            if s < tp1:
-                tp2 = s
-                break
-        if tp2 is None:
-            tp2 = tp1 - 0.75 * (entry - tp1)
-
-        return [tp1, tp2]
-
-# If the model still returned NO_TRADE on a readable chart, force a direction
-    if sig == "NO_TRADE" and entry_n is not None:
-        ns = _nearest_below(supports, entry_n)
-        nr = _nearest_above(resistances, entry_n)
-        # Decide by proximity: closer to support => LONG, else SHORT
-        if ns is None and nr is None:
-            sig = "LONG"
-        elif ns is None:
-            sig = "SHORT"
-        elif nr is None:
-            sig = "LONG"
+    # ---------------------------
+    # 2) ENTRY snapped to S/R (micro allowed)
+    # ---------------------------
+    entry_n = None
+    if cp is not None:
+        if sig == "LONG":
+            entry_n = _nearest_below(supports, cp) or cp
         else:
-            sig = "LONG" if (entry_n - ns) <= (nr - entry_n) else "SHORT"
-        result["signal"] = sig
+            entry_n = _nearest_above(resistances, cp) or cp
+    else:
+        entry_n = _first_number(result.get("entry"))
 
-    
-    # Enforce entry at S/R (micro allowed), SL beyond protective level, and TP on meaningful opposing S/R
+    # buffer beyond level
+    buffer_abs = (entry_n * buf_frac) if entry_n else None
+    if buffer_abs is not None:
+        buffer_abs = max(buffer_abs, (entry_n * 0.0005))
+
+    # ---------------------------
+    # 3) SL: beyond protective level
+    # ---------------------------
+    sl_n = None
+    if entry_n is not None and buffer_abs is not None:
+        if sig == "LONG":
+            s_level = _nearest_below(supports, entry_n) or entry_n
+            sl_n = s_level - buffer_abs
+            if sl_n >= entry_n:
+                sl_n = entry_n - 2.0 * buffer_abs
+        else:
+            r_level = _nearest_above(resistances, entry_n) or entry_n
+            sl_n = r_level + buffer_abs
+            if sl_n <= entry_n:
+                sl_n = entry_n + 2.0 * buffer_abs
+
+    # ---------------------------
+    # 4) TP: meaningful opposing levels (skip micro noise)
+    # ---------------------------
+    tps_out: list[float] = []
     if entry_n is not None and sl_n is not None:
-        rr_min, min_tp_dist_frac, buffer_frac = _instrument_profile(pair, timeframe, mode_norm)
-        buffer_abs = max(entry_n * buffer_frac, entry_n * 0.0005)
-
-        # --- snap ENTRY to nearest level (micro allowed) ---
+        R = abs(entry_n - sl_n)
+        # RR-based fallback target
         if sig == "LONG":
-            entry_snap = _pick_entry_long(entry_n, supports)
-            if entry_snap is not None:
-                entry_n = float(entry_snap)
-                result["entry"] = _fmt_level(entry_n)
-        elif sig == "SHORT":
-            entry_snap = _pick_entry_short(entry_n, resistances)
-            if entry_snap is not None:
-                entry_n = float(entry_snap)
-                result["entry"] = _fmt_level(entry_n)
+            tp_rr = entry_n + rr_min * R
+            tp1 = _meaningful_above(resistances, entry_n, min_tp_frac) or tp_rr
+            # ensure TP1 not below RR fallback too much (avoid tiny TP)
+            tp1 = max(tp1, tp_rr)
+            # TP2 = next meaningful resistance above TP1 (or extension)
+            tp2 = _meaningful_above(resistances, tp1, min_tp_frac) or (tp1 + 0.75 * (tp1 - entry_n))
+            tps_out = [tp1, tp2]
+        else:
+            tp_rr = entry_n - rr_min * R
+            tp1 = _meaningful_below(supports, entry_n, min_tp_frac) or tp_rr
+            tp1 = min(tp1, tp_rr)
+            tp2 = _meaningful_below(supports, tp1, min_tp_frac) or (tp1 - 0.75 * (entry_n - tp1))
+            tps_out = [tp1, tp2]
 
-        # Recompute nearest protective levels around snapped entry
-        ns = _nearest_below(supports, entry_n) if supports else None
-        nr = _nearest_above(resistances, entry_n) if resistances else None
+    # ---------------------------
+    # 5) Fill result fields
+    # ---------------------------
+    result["entry"] = _fmt_level(entry_n)
+    result["stop_loss"] = _fmt_level(sl_n)
+    result["take_profit"] = [_fmt_level(x) for x in tps_out if x is not None]
 
-        # --- SL: classic trader placement (beyond the level / swing) ---
-        if sig == "LONG":
-            # Prefer SL below the entry support (or below nearest support if entry not exactly on support)
-            if ns is not None:
-                sl_new = ns - buffer_abs
-                if sl_new < entry_n:
-                    sl_n = sl_new
-                    result["stop_loss"] = _fmt_level(sl_n)
-            # If model SL is still tighter/invalid, keep ours.
-        elif sig == "SHORT":
-            if nr is not None:
-                sl_new = nr + buffer_abs
-                if sl_new > entry_n:
-                    sl_n = sl_new
-                    result["stop_loss"] = _fmt_level(sl_n)
-
-        # --- TP: meaningful S/R (skip micro noise) + minimum RR ---
-        if sig == "LONG":
-            tps_sel = _pick_tp_levels_long(entry_n, sl_n, resistances, rr_min, min_tp_dist_frac)
-            if tps_sel:
-                result["take_profit"] = [_fmt_level(x) for x in tps_sel]
-                tp0_n = tps_sel[0]
-        elif sig == "SHORT":
-            tps_sel = _pick_tp_levels_short(entry_n, sl_n, supports, rr_min, min_tp_dist_frac)
-            if tps_sel:
-                result["take_profit"] = [_fmt_level(x) for x in tps_sel]
-                tp0_n = tps_sel[0]
-
-    # Ensure support_levels/resistance_levels exist as lists of strings
-
+    # Keep S/R as strings
     if not isinstance(result.get("support_levels"), list):
         result["support_levels"] = []
     if not isinstance(result.get("resistance_levels"), list):
@@ -951,27 +1324,18 @@ Output rules:
     result["support_levels"] = [str(x) for x in (result.get("support_levels") or []) if str(x).strip()]
     result["resistance_levels"] = [str(x) for x in (result.get("resistance_levels") or []) if str(x).strip()]
 
-    if sig == "LONG" and entry_n is not None and sl_n is not None:
-        if sl_n >= entry_n:
-            _force_no_trade("NO_TRADE: inconsistent levels (for LONG, SL must be below entry).")
-            return result
-        if tp0_n is not None and tp0_n <= entry_n:
-            _force_no_trade("NO_TRADE: inconsistent levels (for LONG, TP must be above entry).")
-            return result
-    if sig == "SHORT" and entry_n is not None and sl_n is not None:
-        if sl_n <= entry_n:
-            _force_no_trade("NO_TRADE: inconsistent levels (for SHORT, SL must be above entry).")
-            return result
-        if tp0_n is not None and tp0_n >= entry_n:
-            _force_no_trade("NO_TRADE: inconsistent levels (for SHORT, TP must be below entry).")
-            return result
-
     # Ensure lists
     if not isinstance(result.get("issues"), list):
         result["issues"] = [str(result.get("issues") or "")]
     if not isinstance(result.get("rationale"), list):
         result["rationale"] = [str(result.get("rationale") or "")]
-    result["take_profit"] = [str(x) for x in (result.get("take_profit") or []) if str(x).strip()]
+
+    # Confidence floor for product (but keep low if unclear)
+    try:
+        conf = int(result.get("confidence") or 0)
+    except Exception:
+        conf = 0
+    result["confidence"] = max(12, min(conf, 95))
 
     return result
 
@@ -1237,9 +1601,10 @@ def analyze():
     db.commit()
 
     try:
-        result = analyze_with_openai_pro(
-            image_bytes=image_bytes,
-            image_mime=image_mime,
+        # NOTE: Engine switched to deterministic mechanical logic.
+        # We keep the chart upload flow unchanged (for UI consistency), but the
+        # decision-making comes from OHLC market data, not the screenshot.
+        result = analyze_with_mechanical_engine(
             pair=pair,
             timeframe=timeframe,
             capital=capital,
