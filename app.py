@@ -624,71 +624,46 @@ def analyze_with_openai_pro(
     }
 
     instruction = f"""
-You are a rule-based trading engine. You MUST behave mechanically and consistently.
-
-TOP PRIORITY (in order):
-1) Swing highs/lows (HH/HL/LH/LL) and STRUCTURE (BOS/CHoCH).
-2) Meaningful Support/Resistance from major swings and consolidations.
-3) Classic breakout + return (break-and-retest) at those levels:
-   - Break of resistance then retest from above -> LONG continuation.
-   - Break of support then retest from below -> SHORT continuation.
-   - Trendline break + retest counts ONLY if the trendline is clearly respected (2–3 touches).
-4) Liquidity concepts (equal highs/lows, obvious stop pools) to place SL beyond them.
-5) Candle patterns ONLY as confirmation at a level/retest (do NOT use candles without context):
-   - Engulfing (bull/bear), Pin bar / hammer / shooting star, Inside bar break, Morning/Evening star.
-6) News awareness: if high-impact macro is near, the trade still must exist but should be LOW-RISK (wider SL buffer, conservative TP).
+You are a professional trading analyst.
 
 Task:
-A) First decide whether the image contains a readable price chart screenshot.
-   - Set is_chart=false ONLY if it is not a chart OR price scale is not readable.
-B) If is_chart=true, you MUST return a direction: LONG or SHORT (never NO_TRADE).
-   - If edge is weak/unclear, still return a trade, but make it a "STRUCTURE-BASED LOW-EDGE" plan using nearest strong S/R.
+1) First decide whether the image contains a readable price chart screenshot. Set is_chart=false if it is NOT a chart, or if prices/timeframe are not readable.
+2) If is_chart=true, you MUST return a direction: LONG or SHORT.
+   - NO_TRADE is allowed ONLY if the image is not a readable price chart (candles/price scale/timeframe not readable).
+   - If the edge is weak or structure is messy, do NOT output NO_TRADE. Instead produce a LOW-EDGE trade using the nearest support/resistance.
 
-LEVELS (MANDATORY):
-- Extract 2–4 nearest SUPPORT levels below current price and 2–4 nearest RESISTANCE levels above current price.
-- Levels MUST be meaningful: major swing highs/lows, range boundaries, consolidation edges.
-- Ignore tiny micro-levels very close to price unless the chart is clearly tight-range (scalp).
+Support/Resistance rule (MANDATORY):
+- IMPORTANT: levels must be MEANINGFUL (swing highs/lows, consolidation boundaries). Do NOT use tiny micro-levels a few dollars away.
+- IMPORTANT: nearest resistance/support should normally be at least ~1% away from current price for SWING, unless the chart is very tight-range.
 
-ENTRY LOGIC (MANDATORY):
-- Do NOT default to "market now".
-- Prefer LIMIT-style entries at the nearest logical retest point:
-  * LONG: entry near (a) reclaimed resistance retest, or (b) nearest support in an up-structure.
-  * SHORT: entry near (a) broken support retest from below, or (b) nearest resistance in a down-structure.
-- If the chart shows a clean break-and-retest (your main setup), base the entry on that retest level.
-
-STOP-LOSS (MANDATORY):
-- Place SL beyond the nearest protective structure:
-  * LONG: below the nearest meaningful support / last swing low / liquidity pool (not under a tiny wick).
-  * SHORT: above the nearest meaningful resistance / last swing high / liquidity pool.
-- Use a small buffer.
-
-TAKE-PROFIT (MANDATORY):
-- TP1 must be the nearest opposing meaningful level:
-  * LONG: nearest resistance above entry.
-  * SHORT: nearest support below entry.
-- If multiple levels exist, choose the first clear one.
+- Extract 2–4 nearest SUPPORT levels below current price and 2–4 nearest RESISTANCE levels above current price visible on the chart.
+- Populate support_levels and resistance_levels with those prices (strings like "1975" or "1975.5").
+- If signal=LONG:
+  * Entry: near current price or near nearest support (tight range allowed)
+  * Stop-loss: below the nearest support (not just under a local wick; beyond liquidity) with a small buffer
+  * Take-profit: at the nearest resistance above entry (first clear resistance)
+- If signal=SHORT:
+  * Entry: near current price or near nearest resistance
+  * Stop-loss: above the nearest resistance with a small buffer
+  * Take-profit: at the nearest support below entry (first clear support)
 
 Context:
 - Pair: {pair}
 - Timeframe: {timeframe}
-- Mode: {mode_norm.upper()} (SCALP = tighter levels; SWING = wider structure-based)
+- Mode: {mode_norm.upper()} (SCALP = tighter SL/TP, quicker invalidation; SWING = wider structure-based levels)
 - Capital: {capital}
 - Risk per trade: {risk_fraction} (fraction of capital, e.g. 0.02 = 2%)
 
-News context (best-effort, may be empty):
+News (best-effort, may be empty):
 {news_context or ""}
 
 Output rules:
 - Return ONLY JSON matching the schema (no markdown).
-- If is_chart=true, signal MUST be LONG or SHORT.
-- Always fill support_levels and resistance_levels (2–4 each).
-- Always provide concrete entry/SL/TP and a clear invalidation.
-- In rationale, explicitly mention:
-  (1) the swing structure (HH/HL/LH/LL, BOS/CHoCH),
-  (2) the key S/R levels used,
-  (3) whether there is a break-and-retest,
-  (4) any candle confirmation,
-  (5) the biggest risk (including news/volatility).
+- Avoid NO_TRADE unless the image is not a readable price chart.
+- If LONG/SHORT, ALWAYS provide concrete entry/SL/TP and ensure TP is the nearest opposing level (TP at nearest resistance for LONG / nearest support for SHORT) and SL is beyond the nearest protective level with a small buffer.
+- Always fill support_levels and resistance_levels (2–4 each) based on visible chart levels.
+- If LONG/SHORT, provide concrete entry/SL/TP levels (numbers or tight ranges) and a clear invalidation.
+- Provide 6–12 short bullet points in rationale (structure, levels, liquidity/price action, and the biggest risk).
 """
 
     resp = client.responses.create(
@@ -755,7 +730,19 @@ Output rules:
         if not isinstance(result.get("rationale"), list):
             result["rationale"] = [str(result.get("rationale") or "")]
 
-    # Parse support/resistance early (used to enforce structure-first planning)
+    # Must have entry + SL
+    if result.get("entry") is None or result.get("stop_loss") is None:
+        _force_no_trade("NO_TRADE: missing entry or stop-loss.")
+        return result
+
+    entry_n = _first_number(result.get("entry"))
+    sl_n = _first_number(result.get("stop_loss"))
+    tps = result.get("take_profit") or []
+    if not isinstance(tps, list):
+        tps = []
+    tp0_n = _first_number(tps[0]) if tps else None
+
+    # Parse support/resistance levels (strings -> floats)
     def _parse_levels(vals):
         out_levels = []
         if not isinstance(vals, list):
@@ -764,43 +751,14 @@ Output rules:
             n = _first_number(v)
             if n is not None:
                 out_levels.append(float(n))
-        return sorted(set(out_levels))
+        # de-dup and sort
+        out_levels = sorted(set(out_levels))
+        return out_levels
 
     supports = _parse_levels(result.get("support_levels") or [])
     resistances = _parse_levels(result.get("resistance_levels") or [])
-    # Must have entry + SL (product rule: if is_chart=true, still return a trade plan)
-    if result.get("entry") is None:
-        # Approximate current price from nearest surrounding levels if possible.
-        if supports and resistances:
-            approx_px = (max(supports) + min(resistances)) / 2.0
-        elif supports:
-            approx_px = supports[-1] * 1.01
-        elif resistances:
-            approx_px = resistances[0] * 0.99
-        else:
-            approx_px = None
-        if approx_px is not None:
-            result["entry"] = str(round(approx_px, 4))
 
-    # Normalize numbers after potential synthesis
-    entry_n = _first_number(result.get("entry"))
-    sl_n = _first_number(result.get("stop_loss"))
-
-    # If still missing entry, treat as unreadable chart (rare)
-    if entry_n is None:
-        _force_no_trade("NO_TRADE: missing entry and cannot infer price.")
-        return result
-
-    tps = result.get("take_profit") or []
-    if not isinstance(tps, list):
-        tps = []
-    tp0_n = _first_number(tps[0]) if tps else None
-    tps = result.get("take_profit") or []
-    if not isinstance(tps, list):
-        tps = []
-    tp0_n = _first_number(tps[0]) if tps else None
-
-
+    
     def _nearest_below(levels, x):
         below = [lv for lv in levels if lv < x]
         return max(below) if below else None
@@ -808,27 +766,6 @@ Output rules:
     def _nearest_above(levels, x):
         above = [lv for lv in levels if lv > x]
         return min(above) if above else None
-
-    def _pick_tp_above(levels, x, min_dist_frac):
-        # pick nearest level above x that is at least min_dist_frac away; otherwise fall back to the farthest provided level
-        above = sorted([lv for lv in levels if lv > x])
-        if not above:
-            return None
-        for lv in above:
-            if (lv - x) / x >= min_dist_frac:
-                return lv
-        return above[-1]
-
-    def _pick_tp_below(levels, x, min_dist_frac):
-        below = sorted([lv for lv in levels if lv < x])
-        if not below:
-            return None
-        below = below[::-1]  # descending
-        for lv in below:
-            if (x - lv) / x >= min_dist_frac:
-                return lv
-        return below[-1]
-
 
     def _fmt_level(x: float) -> str:
         if x is None:
@@ -838,7 +775,109 @@ Output rules:
         s = f"{x:.4f}".rstrip("0").rstrip(".")
         return s
 
-    # If the model still returned NO_TRADE on a readable chart, force a direction
+    # --- Entry/TP selection helpers (structure + S/R first) ---
+    # User requirement:
+    # - Entry should be AT/UNDER support for LONG, AT/ABOVE resistance for SHORT (micro levels allowed).
+    # - TP should be on meaningful opposing S/R (skip micro noise), ideally meeting minimum RR.
+
+    def _instrument_profile(sym: str, tf: str, mode_norm: str):
+        s = (sym or "").upper()
+        tfu = (tf or "").upper()
+        # Defaults (reasonable, not perfect; safe for most)
+        rr_min = 1.2 if mode_norm == "scalp" else 2.0
+        min_tp_frac = 0.0020 if mode_norm == "scalp" else 0.0080  # 0.20% scalp, 0.80% swing
+        buffer_frac = 0.0010 if mode_norm == "scalp" else 0.0015  # 0.10% / 0.15%
+
+        # XTB GOLD/XAUUSD specifics (chart from XTB; avoid tiny TP)
+        if s in ("GOLD", "XAUUSD", "XAUUSD.", "XAUUSD#") or "XAU" in s:
+            rr_min = 1.2 if mode_norm == "scalp" else 2.0
+            # H1+ tends to need more breathing room; avoid tiny “first touch” TP.
+            if tfu in ("1H", "H1", "60", "60M"):
+                min_tp_frac = 0.0025 if mode_norm == "scalp" else 0.0060  # 0.25% scalp, 0.60% swing
+            else:
+                min_tp_frac = 0.0020 if mode_norm == "scalp" else 0.0050
+            buffer_frac = 0.0012 if mode_norm == "scalp" else 0.0018
+
+        return rr_min, min_tp_frac, buffer_frac
+
+    def _pick_entry_long(entry_guess: float, supports: list[float]) -> Optional[float]:
+        if entry_guess is None:
+            return None
+        ns = _nearest_below(supports, entry_guess)
+        # If there is a support below current price, enter at/just above it (limit at support).
+        return ns if ns is not None else entry_guess
+
+    def _pick_entry_short(entry_guess: float, resistances: list[float]) -> Optional[float]:
+        if entry_guess is None:
+            return None
+        nr = _nearest_above(resistances, entry_guess)
+        return nr if nr is not None else entry_guess
+
+    def _pick_tp_levels_long(entry: float, sl: float, resistances: list[float], rr_min: float, min_tp_frac: float):
+        if entry is None or sl is None or sl >= entry:
+            return []
+        R = entry - sl
+        tp_rr = entry + rr_min * R
+
+        cands = sorted([r for r in resistances if r is not None and r > entry])
+        min_price = entry * (1 + min_tp_frac)
+
+        # TP1: first resistance that is far enough AND meets RR target
+        tp1 = None
+        for r in cands:
+            if r >= min_price and r >= tp_rr:
+                tp1 = r
+                break
+
+        # If none meets both, take the first "far enough" level; if still none, RR-based.
+        if tp1 is None:
+            far = [r for r in cands if r >= min_price]
+            tp1 = far[0] if far else tp_rr
+            # ensure RR at least
+            tp1 = max(tp1, tp_rr)
+
+        # TP2: next resistance above TP1; else extension.
+        tp2 = None
+        for r in cands:
+            if r > tp1:
+                tp2 = r
+                break
+        if tp2 is None:
+            tp2 = tp1 + 0.75 * (tp1 - entry)
+
+        return [tp1, tp2]
+
+    def _pick_tp_levels_short(entry: float, sl: float, supports: list[float], rr_min: float, min_tp_frac: float):
+        if entry is None or sl is None or sl <= entry:
+            return []
+        R = sl - entry
+        tp_rr = entry - rr_min * R
+
+        cands = sorted([s for s in supports if s is not None and s < entry], reverse=True)
+        max_price = entry * (1 - min_tp_frac)
+
+        tp1 = None
+        for s in cands:
+            if s <= max_price and s <= tp_rr:
+                tp1 = s
+                break
+
+        if tp1 is None:
+            far = [s for s in cands if s <= max_price]
+            tp1 = far[0] if far else tp_rr
+            tp1 = min(tp1, tp_rr)
+
+        tp2 = None
+        for s in cands:
+            if s < tp1:
+                tp2 = s
+                break
+        if tp2 is None:
+            tp2 = tp1 - 0.75 * (entry - tp1)
+
+        return [tp1, tp2]
+
+# If the model still returned NO_TRADE on a readable chart, force a direction
     if sig == "NO_TRADE" and entry_n is not None:
         ns = _nearest_below(supports, entry_n)
         nr = _nearest_above(resistances, entry_n)
@@ -853,44 +892,58 @@ Output rules:
             sig = "LONG" if (entry_n - ns) <= (nr - entry_n) else "SHORT"
         result["signal"] = sig
 
-    # Enforce "TP at nearest opposing level" and "SL beyond nearest protective level"
+    
+    # Enforce entry at S/R (micro allowed), SL beyond protective level, and TP on meaningful opposing S/R
     if entry_n is not None and sl_n is not None:
-        buffer_abs = max(entry_n * 0.0015, entry_n * 0.0005)
+        rr_min, min_tp_dist_frac, buffer_frac = _instrument_profile(pair, timeframe, mode_norm)
+        buffer_abs = max(entry_n * buffer_frac, entry_n * 0.0005)
 
-        # Minimum TP distance to avoid micro 'noise' levels
-        min_tp_dist_frac = 0.005 if mode_norm == "scalp" else 0.015  # 0.5% scalp, 1.5% swing
-  # ~0.15% buffer (min 0.05%)
-
+        # --- snap ENTRY to nearest level (micro allowed) ---
         if sig == "LONG":
-            ns = _nearest_below(supports, entry_n)
-            nr = _pick_tp_above(resistances, entry_n, min_tp_dist_frac)
-            # Override TP to meaningful resistance (avoid micro levels)
-            if nr is not None:
-                result["take_profit"] = [_fmt_level(nr)]
-                tp0_n = nr
-            # Override SL to below nearest support if available
+            entry_snap = _pick_entry_long(entry_n, supports)
+            if entry_snap is not None:
+                entry_n = float(entry_snap)
+                result["entry"] = _fmt_level(entry_n)
+        elif sig == "SHORT":
+            entry_snap = _pick_entry_short(entry_n, resistances)
+            if entry_snap is not None:
+                entry_n = float(entry_snap)
+                result["entry"] = _fmt_level(entry_n)
+
+        # Recompute nearest protective levels around snapped entry
+        ns = _nearest_below(supports, entry_n) if supports else None
+        nr = _nearest_above(resistances, entry_n) if resistances else None
+
+        # --- SL: classic trader placement (beyond the level / swing) ---
+        if sig == "LONG":
+            # Prefer SL below the entry support (or below nearest support if entry not exactly on support)
             if ns is not None:
                 sl_new = ns - buffer_abs
                 if sl_new < entry_n:
-                    result["stop_loss"] = _fmt_level(sl_new)
                     sl_n = sl_new
-
+                    result["stop_loss"] = _fmt_level(sl_n)
+            # If model SL is still tighter/invalid, keep ours.
         elif sig == "SHORT":
-            nr = _nearest_above(resistances, entry_n)
-            ns = _nearest_below(supports, entry_n)
-            if ns is not None:
-                # pick meaningful TP (avoid micro levels)
-                tp_sel = _pick_tp_below(supports, entry_n, min_tp_dist_frac)
-                if tp_sel is not None:
-                    result["take_profit"] = [_fmt_level(tp_sel)]
-                    tp0_n = tp_sel
             if nr is not None:
                 sl_new = nr + buffer_abs
                 if sl_new > entry_n:
-                    result["stop_loss"] = _fmt_level(sl_new)
                     sl_n = sl_new
+                    result["stop_loss"] = _fmt_level(sl_n)
+
+        # --- TP: meaningful S/R (skip micro noise) + minimum RR ---
+        if sig == "LONG":
+            tps_sel = _pick_tp_levels_long(entry_n, sl_n, resistances, rr_min, min_tp_dist_frac)
+            if tps_sel:
+                result["take_profit"] = [_fmt_level(x) for x in tps_sel]
+                tp0_n = tps_sel[0]
+        elif sig == "SHORT":
+            tps_sel = _pick_tp_levels_short(entry_n, sl_n, supports, rr_min, min_tp_dist_frac)
+            if tps_sel:
+                result["take_profit"] = [_fmt_level(x) for x in tps_sel]
+                tp0_n = tps_sel[0]
 
     # Ensure support_levels/resistance_levels exist as lists of strings
+
     if not isinstance(result.get("support_levels"), list):
         result["support_levels"] = []
     if not isinstance(result.get("resistance_levels"), list):
