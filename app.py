@@ -7,10 +7,23 @@ import re
 import sqlite3
 import math
 
-import cv2
-import numpy as np
+# Optional deps for screenshot-based mechanical fallback (NOT required for Binance OHLC engine)
+try:
+    import cv2  # type: ignore
+except Exception:
+    cv2 = None
+
+try:
+    import numpy as np  # type: ignore
+except Exception:
+    np = None
+
 from PIL import Image
-import pytesseract
+
+try:
+    import pytesseract  # type: ignore
+except Exception:
+    pytesseract = None
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -700,6 +713,37 @@ def analyze_with_image_mechanical_engine(
     news_context: str = "",
     binance_error: str = "",
 ) -> dict:
+    # Dependency guard: many hosts (e.g., Render on Py3.13) may not ship OpenCV/OCR wheels by default.
+    if cv2 is None or np is None or pytesseract is None:
+        missing = [name for name,val in [('cv2',cv2),('numpy',np),('pytesseract',pytesseract)] if val is None]
+        mode_norm = (mode or '').strip().lower()
+        if mode_norm not in ('scalp','swing'):
+            mode_norm = 'swing'
+        return {
+            'pair': pair,
+            'timeframe': timeframe,
+            'mode': mode_norm.upper(),
+            'is_chart': True,
+            'signal': 'NO_TRADE',
+            'confidence': 20,
+            'setup': 'Screenshot engine unavailable (missing optional dependencies).',
+            'entry': None,
+            'stop_loss': None,
+            'take_profit': [],
+            'support_levels': [],
+            'resistance_levels': [],
+            'position_size': None,
+            'risk': f'{risk_fraction}',
+            'invalidation': 'N/A',
+            'issues': [f"Missing optional deps: {', '.join(missing)}"],
+            'rationale': [
+                'This deployment does not include OpenCV/OCR dependencies.',
+                'For crypto pairs listed on Binance, the OHLC mechanical engine still works without these deps.',
+            ],
+            'news': {'mode': 'auto' if bool(news_context) else 'not_provided', 'impact': 'UNKNOWN', 'summary': news_context or '', 'key_points': []},
+            'explanation': 'NO_TRADE: screenshot engine unavailable.',
+        }
+
     """
     Deterministic, screenshot-based engine (NO prompts):
     - Detects manually drawn trendlines/horizontal S/R (usually blue) via color mask + Hough.
