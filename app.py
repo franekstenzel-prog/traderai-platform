@@ -5,6 +5,12 @@ import json
 import os
 import re
 import sqlite3
+import math
+
+import cv2
+import numpy as np
+from PIL import Image
+import pytesseract
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -682,6 +688,411 @@ def _safe_no_trade(
     }
 
 
+
+def analyze_with_image_mechanical_engine(
+    image_bytes: bytes,
+    image_mime: str | None,
+    pair: str,
+    timeframe: str,
+    capital: float,
+    risk_fraction: float,
+    mode: str,
+    news_context: str = "",
+    binance_error: str = "",
+) -> dict:
+    """
+    Deterministic, screenshot-based engine (NO prompts):
+    - Detects manually drawn trendlines/horizontal S/R (usually blue) via color mask + Hough.
+    - Uses OCR on right axis to build pixel->price mapping (linear).
+    - Triggers:
+        SHORT: break below rising trendline + retest from below
+        LONG:  break above falling trendline + retest from above
+    If scale cannot be inferred, returns NO_TRADE (rather than guessing).
+    """
+
+    mode_norm = (mode or "").strip().lower()
+    if mode_norm not in ("scalp", "swing"):
+        mode_norm = "swing"
+
+    # -------- Load image
+    np_img = np.frombuffer(image_bytes, dtype=np.uint8)
+    bgr = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+    if bgr is None:
+        return _safe_no_trade(
+            pair, timeframe, mode_norm, risk_fraction,
+            "NO_TRADE: unreadable screenshot.",
+            issues=["cv2.imdecode returned None."],
+            confidence=15,
+            news_context=news_context,
+        )
+
+    h_img, w_img = bgr.shape[:2]
+
+    # -------- OCR: extract numeric labels with bounding boxes
+    # We whitelist digits and separators to reduce noise.
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    pil = Image.fromarray(rgb)
+
+    ocr = pytesseract.image_to_data(
+        pil,
+        output_type=pytesseract.Output.DICT,
+        config="--psm 6 -c tessedit_char_whitelist=0123456789.,",
+    )
+
+    nums = []
+    for i, txt in enumerate(ocr.get("text", [])):
+        t = (txt or "").strip()
+        if not t:
+            continue
+        t2 = t.replace(",", ".")
+        if re.fullmatch(r"\d{1,6}\.\d{1,3}", t2) or re.fullmatch(r"\d{2,6}", t2):
+            try:
+                val = float(t2)
+            except Exception:
+                continue
+            x = int(ocr["left"][i]); y = int(ocr["top"][i])
+            w = int(ocr["width"][i]); hh = int(ocr["height"][i])
+            conf = float(ocr.get("conf", ["-1"])[i] or -1)
+            nums.append({"val": val, "x": x, "y": y, "w": w, "h": hh, "conf": conf})
+
+    if not nums:
+        return _safe_no_trade(
+            pair, timeframe, mode_norm, risk_fraction,
+            "NO_TRADE: OCR found no price labels.",
+            issues=[f"Binance error: {binance_error}"] if binance_error else [],
+            confidence=18,
+            news_context=news_context,
+        )
+
+    # -------- Build price scale from right-axis labels (x in rightmost 20%)
+    right_candidates = [n for n in nums if n["x"] > int(w_img * 0.78) and n["conf"] >= 30]
+    # If OCR confidence is weak, fall back to all right-side candidates.
+    if len(right_candidates) < 2:
+        right_candidates = [n for n in nums if n["x"] > int(w_img * 0.75)]
+
+    # De-duplicate similar values by rounding (axis often repeats)
+    uniq = {}
+    for n in right_candidates:
+        key = round(n["val"], 2)
+        # keep the one with highest conf
+        if key not in uniq or n["conf"] > uniq[key]["conf"]:
+            uniq[key] = n
+    axis = sorted(list(uniq.values()), key=lambda z: z["y"])
+
+    if len(axis) < 2:
+        return _safe_no_trade(
+            pair, timeframe, mode_norm, risk_fraction,
+            "NO_TRADE: could not infer price scale from screenshot.",
+            issues=["Need at least two readable axis labels for pixel->price mapping."],
+            confidence=20,
+            news_context=news_context,
+        )
+
+    # Fit linear mapping price = a*y + b using least squares on (y_center, price)
+    ys = np.array([a["y"] + a["h"] / 2 for a in axis], dtype=np.float64)
+    ps = np.array([a["val"] for a in axis], dtype=np.float64)
+    A = np.vstack([ys, np.ones_like(ys)]).T
+    a, b = np.linalg.lstsq(A, ps, rcond=None)[0]  # price ≈ a*y + b
+
+    def y_to_price(y: float) -> float:
+        return float(a * y + b)
+
+    def price_to_y(p: float) -> float:
+        if abs(a) < 1e-9:
+            return float(h_img / 2)
+        return float((p - b) / a)
+
+    # Current price estimate:
+    # Prefer large, high-confidence numbers that are NOT on the axis (usually the last price label).
+    non_axis = [n for n in nums if n["x"] < int(w_img * 0.78)]
+    non_axis = sorted(non_axis, key=lambda z: (-(z["conf"]), -(z["w"] * z["h"])))
+    current_price = non_axis[0]["val"] if non_axis else axis[len(axis)//2]["val"]
+
+    # -------- Detect blue lines (trendline + horizontal levels)
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+
+    # Typical platform drawings are cyan/blue. We use a broad range.
+    lower = np.array([80, 40, 40])
+    upper = np.array([140, 255, 255])
+    mask = cv2.inRange(hsv, lower, upper)
+
+    # Clean mask
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel, iterations=1)
+
+    edges = cv2.Canny(mask, 50, 150)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=60, minLineLength=int(w_img * 0.15), maxLineGap=12)
+
+    if lines is None or len(lines) == 0:
+        return _safe_no_trade(
+            pair, timeframe, mode_norm, risk_fraction,
+            "NO_TRADE: no drawn levels detected (trendline/SR).",
+            issues=["No blue lines detected by Hough transform."],
+            confidence=22,
+            news_context=news_context,
+        )
+
+    # Classify lines
+    trend_candidates = []
+    horiz_candidates = []
+    for (x1, y1, x2, y2) in lines[:, 0]:
+        dx = x2 - x1
+        dy = y2 - y1
+        if dx == 0:
+            continue
+        slope = dy / dx
+        length = math.hypot(dx, dy)
+        angle = abs(math.degrees(math.atan2(dy, dx)))
+        # near horizontal
+        if angle < 10:
+            horiz_candidates.append((length, x1, y1, x2, y2, slope))
+        # trend-ish (not too steep, not too flat)
+        elif 10 <= angle <= 70:
+            trend_candidates.append((length, x1, y1, x2, y2, slope))
+
+    trend_candidates.sort(reverse=True, key=lambda t: t[0])
+    horiz_candidates.sort(reverse=True, key=lambda t: t[0])
+
+    if not trend_candidates:
+        return _safe_no_trade(
+            pair, timeframe, mode_norm, risk_fraction,
+            "NO_TRADE: no trendline detected.",
+            issues=["Only horizontal lines detected."],
+            confidence=25,
+            news_context=news_context,
+        )
+
+    # Pick the longest trendline
+    _, x1, y1, x2, y2, slope = trend_candidates[0]
+    # Ensure x1 < x2
+    if x2 < x1:
+        x1, x2 = x2, x1
+        y1, y2 = y2, y1
+        slope = (y2 - y1) / (x2 - x1)
+
+    # Line equation y = m*x + c
+    m = (y2 - y1) / (x2 - x1)
+    c = y1 - m * x1
+
+    def line_y(x: float) -> float:
+        return float(m * x + c)
+
+    # Determine chart area heuristically: exclude left sidebar if present (platform UI)
+    # We focus on central-right area.
+    x_left = int(w_img * 0.20)
+    x_right = int(w_img * 0.95)
+    y_top = int(h_img * 0.08)
+    y_bot = int(h_img * 0.92)
+
+    # Extract "price pixels" (candles): red/green regions
+    hsv2 = hsv
+    # green candles
+    green = cv2.inRange(hsv2, np.array([35, 40, 40]), np.array([90, 255, 255]))
+    # red candles (wrap)
+    red1 = cv2.inRange(hsv2, np.array([0, 50, 50]), np.array([12, 255, 255]))
+    red2 = cv2.inRange(hsv2, np.array([165, 50, 50]), np.array([180, 255, 255]))
+    red = cv2.bitwise_or(red1, red2)
+    price_mask = cv2.bitwise_or(red, green)
+
+    roi = price_mask[y_top:y_bot, x_left:x_right]
+
+    # For each x column in the last part of chart, estimate "price trace" y as median of candle pixels
+    # We look at last 18% of width inside ROI.
+    roi_h, roi_w = roi.shape[:2]
+    x_start = int(roi_w * 0.82)
+    cols = []
+    for xx in range(x_start, roi_w):
+        ys_col = np.where(roi[:, xx] > 0)[0]
+        if ys_col.size == 0:
+            continue
+        cols.append((xx, float(np.median(ys_col))))
+
+    if len(cols) < 30:
+        return _safe_no_trade(
+            pair, timeframe, mode_norm, risk_fraction,
+            "NO_TRADE: cannot read candles reliably from screenshot.",
+            issues=["Too few candle pixels detected in last part of chart."],
+            confidence=22,
+            news_context=news_context,
+        )
+
+    # Convert ROI coordinates back to image coordinates
+    pts = [(x_left + xx, y_top + yy) for xx, yy in cols]
+
+    # Compute relation to trendline
+    diffs = []
+    touches = 0
+    for x, y in pts:
+        ly = line_y(x)
+        diffs.append(y - ly)  # positive => below line (since y grows downward)
+        if abs(y - ly) < 6:  # ~6 px touch tolerance
+            touches += 1
+
+    below_ratio = sum(1 for d in diffs if d > 3) / len(diffs)
+    above_ratio = sum(1 for d in diffs if d < -3) / len(diffs)
+
+    # Retest detection: look back a bit (previous 25% of the sampled columns) for touches on opposite side
+    lookback = diffs[: int(len(diffs) * 0.35)]
+    recent = diffs[int(len(diffs) * 0.65):]
+
+    retest_from_below = (sum(1 for d in lookback if abs(d) < 6) >= 3) and (below_ratio > 0.65)
+    retest_from_above = (sum(1 for d in lookback if abs(d) < 6) >= 3) and (above_ratio > 0.65)
+
+    # Determine direction based on slope sign and break+retest
+    rr_min = 1.2 if mode_norm == "scalp" else 2.0
+    buffer_pct = 0.0015 if mode_norm == "scalp" else 0.0025
+
+    # Horizontal levels (take top 4)
+    sr_levels = []
+    for length, hx1, hy1, hx2, hy2, _s in horiz_candidates[:8]:
+        y_mid = (hy1 + hy2) / 2
+        p = y_to_price(y_mid)
+        sr_levels.append(p)
+    # Dedup close levels
+    sr_levels_sorted = sorted(sr_levels)
+    dedup = []
+    for p in sr_levels_sorted:
+        if not dedup or abs(p - dedup[-1]) > max(0.0005 * abs(p), 0.5):
+            dedup.append(p)
+    # Split into supports/resistances vs current_price
+    supports = sorted([p for p in dedup if p < current_price], reverse=True)[:4]
+    resistances = sorted([p for p in dedup if p > current_price])[:4]
+
+    # Trendline price at right edge (for SL anchor)
+    tl_price_now = y_to_price(line_y(x_right))
+
+    if slope > 0 and retest_from_below:
+        # Rising trendline broken -> SHORT
+        entry = current_price
+        sl = tl_price_now * (1 + buffer_pct)
+        R = sl - entry
+        if R <= 0:
+            return _safe_no_trade(
+                pair, timeframe, mode_norm, risk_fraction,
+                "NO_TRADE: invalid geometry (SHORT).",
+                issues=["SL not above entry (scale/OCR mismatch)."],
+                supports=supports,
+                resistances=resistances,
+                confidence=30,
+                news_context=news_context,
+            )
+        tp_rr = entry - rr_min * R
+        tp = min(tp_rr, supports[0]) if supports else tp_rr
+
+        # sizing
+        stop_distance = abs(entry - sl)
+        risk_amount = capital * risk_fraction
+        notional = (risk_amount / stop_distance) if stop_distance else 0.0
+        notional = min(notional, capital * 8)
+
+        return {
+            "pair": pair,
+            "timeframe": timeframe,
+            "mode": "SCALP" if mode_norm == "scalp" else "SWING",
+            "is_chart": True,
+            "signal": "SHORT",
+            "confidence": 66 if mode_norm == "swing" else 60,
+            "setup": "Trendline break + retest (SHORT).",
+            "entry": str(_fmt_level(entry)),
+            "stop_loss": str(_fmt_level(sl)),
+            "take_profit": [str(_fmt_level(tp))],
+            "support_levels": [str(_fmt_level(x)) for x in supports],
+            "resistance_levels": [str(_fmt_level(x)) for x in resistances],
+            "position_size": str(round(notional, 2)) if notional else None,
+            "risk": str(risk_fraction),
+            "invalidation": "Price reclaims broken trendline (close above it).",
+            "issues": [],
+            "rationale": [
+                "Detected manually drawn rising trendline (blue).",
+                "Price action is predominantly below the trendline on the right edge (break).",
+                "Prior touches near the line suggest a retest from below.",
+                "SL anchored above trendline with a small buffer; TP by RR and nearest support if found.",
+            ],
+            "news": {
+                "mode": "auto" if bool(news_context) else "not_provided",
+                "impact": "UNKNOWN",
+                "summary": (news_context or "")[:500],
+                "key_points": [],
+            },
+            "explanation": "Screenshot-based mechanical engine (OpenCV+OCR, deterministic).",
+        }
+
+    if slope < 0 and retest_from_above:
+        # Falling trendline broken -> LONG
+        entry = current_price
+        sl = tl_price_now * (1 - buffer_pct)
+        R = entry - sl
+        if R <= 0:
+            return _safe_no_trade(
+                pair, timeframe, mode_norm, risk_fraction,
+                "NO_TRADE: invalid geometry (LONG).",
+                issues=["SL not below entry (scale/OCR mismatch)."],
+                supports=supports,
+                resistances=resistances,
+                confidence=30,
+                news_context=news_context,
+            )
+        tp_rr = entry + rr_min * R
+        tp = max(tp_rr, resistances[0]) if resistances else tp_rr
+
+        stop_distance = abs(entry - sl)
+        risk_amount = capital * risk_fraction
+        notional = (risk_amount / stop_distance) if stop_distance else 0.0
+        notional = min(notional, capital * 8)
+
+        return {
+            "pair": pair,
+            "timeframe": timeframe,
+            "mode": "SCALP" if mode_norm == "scalp" else "SWING",
+            "is_chart": True,
+            "signal": "LONG",
+            "confidence": 66 if mode_norm == "swing" else 60,
+            "setup": "Trendline break + retest (LONG).",
+            "entry": str(_fmt_level(entry)),
+            "stop_loss": str(_fmt_level(sl)),
+            "take_profit": [str(_fmt_level(tp))],
+            "support_levels": [str(_fmt_level(x)) for x in supports],
+            "resistance_levels": [str(_fmt_level(x)) for x in resistances],
+            "position_size": str(round(notional, 2)) if notional else None,
+            "risk": str(risk_fraction),
+            "invalidation": "Price loses reclaimed trendline (close below it).",
+            "issues": [],
+            "rationale": [
+                "Detected manually drawn falling trendline (blue).",
+                "Price action is predominantly above the trendline on the right edge (break).",
+                "Prior touches near the line suggest a retest from above.",
+                "SL anchored below trendline with a small buffer; TP by RR and nearest resistance if found.",
+            ],
+            "news": {
+                "mode": "auto" if bool(news_context) else "not_provided",
+                "impact": "UNKNOWN",
+                "summary": (news_context or "")[:500],
+                "key_points": [],
+            },
+            "explanation": "Screenshot-based mechanical engine (OpenCV+OCR, deterministic).",
+        }
+
+    # Otherwise: not a clean break+retest
+    why = []
+    why.append(f"slope={'up' if slope>0 else 'down'}")
+    why.append(f"below_ratio={below_ratio:.2f}, above_ratio={above_ratio:.2f}, touches={touches}")
+    why.append(f"retest_from_below={retest_from_below}, retest_from_above={retest_from_above}")
+
+    return _safe_no_trade(
+        pair,
+        timeframe,
+        mode_norm,
+        risk_fraction,
+        "NO_TRADE: no clean trendline break+retest.",
+        issues=why,
+        confidence=38,
+        supports=supports,
+        resistances=resistances,
+        news_context=news_context,
+    )
+
+
 def analyze_with_mechanical_engine(
     pair: str,
     timeframe: str,
@@ -689,6 +1100,8 @@ def analyze_with_mechanical_engine(
     risk_fraction: float,
     mode: str,
     news_context: str = "",
+    image_bytes: bytes | None = None,
+    image_mime: str | None = None,
 ) -> dict:
     """Deterministic signal: EMA10/EMA18 + BOS on fractal swings + ATR buffer."""
 
@@ -699,6 +1112,33 @@ def analyze_with_mechanical_engine(
     try:
         _o, h, l, c = _fetch_binance_klines(pair, timeframe, limit=300)
     except Exception as e:
+        # Fallback: if the symbol is not available on Binance (e.g. GOLD, indices, CFDs),
+        # run a deterministic, image-based engine (no prompts) using OpenCV + OCR.
+        if image_bytes:
+            try:
+                return analyze_with_image_mechanical_engine(
+                    image_bytes=image_bytes,
+                    image_mime=image_mime,
+                    pair=pair,
+                    timeframe=timeframe,
+                    capital=capital,
+                    risk_fraction=risk_fraction,
+                    mode=mode_norm,
+                    news_context=news_context,
+                    binance_error=str(e),
+                )
+            except Exception as ie:
+                return _safe_no_trade(
+                    pair=pair,
+                    timeframe=timeframe,
+                    mode_norm=mode_norm,
+                    risk_fraction=risk_fraction,
+                    reason="NO_TRADE: market data unavailable.",
+                    issues=[f"Binance klines error: {e}", f"Image fallback error: {ie}"],
+                    rationale=["Mechanical engine requires OHLC data or a readable screenshot."],
+                    confidence=20,
+                    news_context=news_context,
+                )
         return _safe_no_trade(
             pair=pair,
             timeframe=timeframe,
@@ -1529,6 +1969,8 @@ def analyze():
             risk_fraction=risk_fraction,
             mode=mode,
             news_context=news_context,
+            image_bytes=image_bytes,
+            image_mime=image_mime,
         )
     except Exception as e:
         flash(f"Analysis failed: {e}", "error")
