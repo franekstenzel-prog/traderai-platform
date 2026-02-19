@@ -539,6 +539,384 @@ def auto_news_context(pair: str, timeframe: str = "") -> str:
 
 
 # -----------------------------
+# Mechanical engine (deterministic, OHLC-based)
+# -----------------------------
+
+_BINANCE_INTERVAL_MAP = {
+    "1M": "1m",
+    "3M": "3m",
+    "5M": "5m",
+    "15M": "15m",
+    "30M": "30m",
+    "1H": "1h",
+    "2H": "2h",
+    "4H": "4h",
+    "6H": "6h",
+    "8H": "8h",
+    "12H": "12h",
+    "1D": "1d",
+    "3D": "3d",
+    "1W": "1w",
+}
+
+
+def _binance_interval(tf: str) -> str:
+    tf = (tf or "").upper().strip()
+    return _BINANCE_INTERVAL_MAP.get(tf, "1h")
+
+
+def _fetch_binance_klines(symbol: str, timeframe: str, limit: int = 300):
+    """Fetch klines from Binance spot public API (best-effort)."""
+    interval = _binance_interval(timeframe)
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={int(limit)}"
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    raw = urlopen(req, timeout=10).read().decode("utf-8")
+    data = json.loads(raw)
+    if not isinstance(data, list) or not data:
+        raise RuntimeError("Binance returned empty klines.")
+
+    # kline: [open_time, open, high, low, close, volume, close_time, ...]
+    o = [float(x[1]) for x in data]
+    h = [float(x[2]) for x in data]
+    l = [float(x[3]) for x in data]
+    c = [float(x[4]) for x in data]
+    return o, h, l, c
+
+
+def _ema(values: list[float], period: int) -> list[float]:
+    if not values:
+        return []
+    if period <= 1:
+        return values[:]
+    k = 2 / (period + 1)
+    out = [float(values[0])]
+    for i in range(1, len(values)):
+        out.append(float(values[i]) * k + out[-1] * (1 - k))
+    return out
+
+
+def _atr(high: list[float], low: list[float], close: list[float], period: int = 14) -> list[float]:
+    if len(close) < 2:
+        return [0.0 for _ in close]
+    tr = [0.0]
+    for i in range(1, len(close)):
+        tr_i = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1]),
+        )
+        tr.append(float(tr_i))
+    return _ema(tr, period)
+
+
+def _swing_points(high: list[float], low: list[float], left: int = 2, right: int = 2):
+    """Simple fractal swings."""
+    sh: list[tuple[int, float]] = []
+    sl: list[tuple[int, float]] = []
+    n = len(high)
+    if n < left + right + 5:
+        return sh, sl
+    for i in range(left, n - right):
+        hh = high[i]
+        ll = low[i]
+        if all(hh > high[i - k] for k in range(1, left + 1)) and all(
+            hh > high[i + k] for k in range(1, right + 1)
+        ):
+            sh.append((i, float(hh)))
+        if all(ll < low[i - k] for k in range(1, left + 1)) and all(
+            ll < low[i + k] for k in range(1, right + 1)
+        ):
+            sl.append((i, float(ll)))
+    return sh, sl
+
+
+def _fmt_level(x: Optional[float]) -> Optional[str]:
+    if x is None:
+        return None
+    if abs(x - round(x)) < 1e-8:
+        return str(int(round(x)))
+    return f"{x:.8f}".rstrip("0").rstrip(".")
+
+
+def _safe_no_trade(
+    pair: str,
+    timeframe: str,
+    mode_norm: str,
+    risk_fraction: float,
+    reason: str,
+    issues: Optional[list[str]] = None,
+    rationale: Optional[list[str]] = None,
+    confidence: int = 25,
+    supports: Optional[list[float]] = None,
+    resistances: Optional[list[float]] = None,
+    news_context: str = "",
+) -> dict:
+    sup = [str(_fmt_level(x)) for x in (supports or []) if x is not None][:4]
+    res = [str(_fmt_level(x)) for x in (resistances or []) if x is not None][:4]
+    news_summary = (news_context or "")[:500]
+    return {
+        "pair": pair,
+        "timeframe": timeframe,
+        "mode": "SCALP" if mode_norm == "scalp" else "SWING",
+        "is_chart": True,
+        "signal": "NO_TRADE",
+        "confidence": int(max(0, min(100, confidence))),
+        "setup": reason,
+        "entry": None,
+        "stop_loss": None,
+        "take_profit": [],
+        "support_levels": sup,
+        "resistance_levels": res,
+        "position_size": None,
+        "risk": str(risk_fraction),
+        "invalidation": "N/A",
+        "issues": issues or [],
+        "rationale": rationale or [],
+        "news": {
+            "mode": "auto" if bool(news_context) else "not_provided",
+            "impact": "UNKNOWN",
+            "summary": news_summary,
+            "key_points": [],
+        },
+        "explanation": "Mechanical engine output (deterministic).",
+    }
+
+
+def analyze_with_mechanical_engine(
+    pair: str,
+    timeframe: str,
+    capital: float,
+    risk_fraction: float,
+    mode: str,
+    news_context: str = "",
+) -> dict:
+    """Deterministic signal: EMA10/EMA18 + BOS on fractal swings + ATR buffer."""
+
+    mode_norm = (mode or "").strip().lower()
+    if mode_norm not in ("scalp", "swing"):
+        mode_norm = "swing"
+
+    try:
+        _o, h, l, c = _fetch_binance_klines(pair, timeframe, limit=300)
+    except Exception as e:
+        return _safe_no_trade(
+            pair=pair,
+            timeframe=timeframe,
+            mode_norm=mode_norm,
+            risk_fraction=risk_fraction,
+            reason="NO_TRADE: market data unavailable.",
+            issues=[f"Binance klines error: {e}"],
+            rationale=["Mechanical engine requires OHLC data."],
+            confidence=20,
+            news_context=news_context,
+        )
+
+    if len(c) < 60:
+        return _safe_no_trade(
+            pair,
+            timeframe,
+            mode_norm,
+            risk_fraction,
+            "NO_TRADE: not enough candles.",
+            issues=["Less than 60 candles returned."],
+            confidence=22,
+            news_context=news_context,
+        )
+
+    ema_fast = _ema(c, 10)
+    ema_slow = _ema(c, 18)
+    atr14 = _atr(h, l, c, 14)
+
+    sh, sl = _swing_points(h, l, left=2, right=2)
+
+    last_close = float(c[-1])
+    last_atr = float(atr14[-1] or 0.0)
+    buffer_abs = max(last_atr * 0.20, last_close * (0.0012 if mode_norm == "scalp" else 0.0020))
+
+    swing_highs = [p for _i, p in sh]
+    swing_lows = [p for _i, p in sl]
+    supports_below = sorted([p for p in swing_lows if p < last_close], reverse=True)
+    resists_above = sorted([p for p in swing_highs if p > last_close])
+
+    if len(sh) < 3 or len(sl) < 3:
+        return _safe_no_trade(
+            pair,
+            timeframe,
+            mode_norm,
+            risk_fraction,
+            "NO_TRADE: insufficient market structure (swings).",
+            issues=["Not enough swing highs/lows for BOS logic."],
+            rationale=["Wait until clearer swing structure forms."],
+            confidence=28,
+            supports=supports_below[:4],
+            resistances=resists_above[:4],
+            news_context=news_context,
+        )
+
+    last_swing_high = float(sh[-1][1])
+    last_swing_low = float(sl[-1][1])
+
+    trend_up = ema_fast[-1] > ema_slow[-1]
+    trend_down = ema_fast[-1] < ema_slow[-1]
+
+    bos_long = last_close > last_swing_high
+    bos_short = last_close < last_swing_low
+
+    rr_min = 1.2 if mode_norm == "scalp" else 2.2
+
+    issues: list[str] = []
+    atr_frac = (last_atr / last_close) if last_close else 0.0
+    if mode_norm == "swing" and atr_frac < 0.002:
+        issues.append("ATR too small: low volatility / tight range.")
+    if mode_norm == "scalp" and atr_frac < 0.0008:
+        issues.append("ATR too small: scalp edge likely poor.")
+
+    if not ((trend_up and bos_long and supports_below) or (trend_down and bos_short and resists_above)):
+        rationale = [
+            "No-trade because strict conditions were not met.",
+            "Mechanical rules require BOTH: (1) trend alignment (EMA10 vs EMA18) and (2) BOS on structure.",
+            f"trend_up={trend_up}, trend_down={trend_down}, bos_long={bos_long}, bos_short={bos_short}",
+        ]
+        return _safe_no_trade(
+            pair,
+            timeframe,
+            mode_norm,
+            risk_fraction,
+            "NO_TRADE: no trend+BOS alignment.",
+            issues=issues,
+            rationale=rationale,
+            confidence=33,
+            supports=supports_below[:4],
+            resistances=resists_above[:4],
+            news_context=news_context,
+        )
+
+    if trend_up and bos_long and supports_below:
+        signal = "LONG"
+        entry = last_close
+        sl_struct = float(supports_below[0])
+        sl_price = sl_struct - buffer_abs
+        R = entry - sl_price
+        if R <= 0:
+            return _safe_no_trade(
+                pair,
+                timeframe,
+                mode_norm,
+                risk_fraction,
+                "NO_TRADE: invalid risk geometry (LONG).",
+                issues=["Computed SL is not below entry."],
+                supports=supports_below[:4],
+                resistances=resists_above[:4],
+                news_context=news_context,
+            )
+        tp_rr = entry + rr_min * R
+        tp_struct = float(resists_above[0]) if resists_above else None
+        tp_price = max(tp_rr, tp_struct) if tp_struct is not None else tp_rr
+        confidence = 64 if mode_norm == "swing" else 58
+        setup = "EMA10>EMA18 + BOS above swing-high."
+        rationale = [
+            "Trend filter: EMA10 above EMA18.",
+            "Trigger: close broke above most recent swing-high (BOS).",
+            "SL beyond nearest swing-low/support with ATR buffer.",
+            "TP respects minimum RR and nearest resistance if present.",
+        ]
+
+    else:
+        signal = "SHORT"
+        entry = last_close
+        sl_struct = float(resists_above[0])
+        sl_price = sl_struct + buffer_abs
+        R = sl_price - entry
+        if R <= 0:
+            return _safe_no_trade(
+                pair,
+                timeframe,
+                mode_norm,
+                risk_fraction,
+                "NO_TRADE: invalid risk geometry (SHORT).",
+                issues=["Computed SL is not above entry."],
+                supports=supports_below[:4],
+                resistances=resists_above[:4],
+                news_context=news_context,
+            )
+        tp_rr = entry - rr_min * R
+        tp_struct = float(supports_below[0]) if supports_below else None
+        tp_price = min(tp_rr, tp_struct) if tp_struct is not None else tp_rr
+        confidence = 64 if mode_norm == "swing" else 58
+        setup = "EMA10<EMA18 + BOS below swing-low."
+        rationale = [
+            "Trend filter: EMA10 below EMA18.",
+            "Trigger: close broke below most recent swing-low (BOS).",
+            "SL beyond nearest swing-high/resistance with ATR buffer.",
+            "TP respects minimum RR and nearest support if present.",
+        ]
+
+    if signal == "LONG" and sl_price >= entry:
+        return _safe_no_trade(
+            pair,
+            timeframe,
+            mode_norm,
+            risk_fraction,
+            "NO_TRADE: inconsistent levels (LONG).",
+            issues=["SL not below entry."],
+            supports=supports_below[:4],
+            resistances=resists_above[:4],
+            news_context=news_context,
+        )
+    if signal == "SHORT" and sl_price <= entry:
+        return _safe_no_trade(
+            pair,
+            timeframe,
+            mode_norm,
+            risk_fraction,
+            "NO_TRADE: inconsistent levels (SHORT).",
+            issues=["SL not above entry."],
+            supports=supports_below[:4],
+            resistances=resists_above[:4],
+            news_context=news_context,
+        )
+
+    position_size = None
+    stop_distance = abs(entry - sl_price)
+    if stop_distance > 0:
+        risk_amount = float(capital) * float(risk_fraction)
+        notional = risk_amount / stop_distance
+        max_notional = float(capital) * 8
+        notional = min(notional, max_notional)
+        if notional > 0:
+            position_size = notional
+
+    news_summary = (news_context or "")[:500]
+
+    return {
+        "pair": pair,
+        "timeframe": timeframe,
+        "mode": "SCALP" if mode_norm == "scalp" else "SWING",
+        "is_chart": True,
+        "signal": signal,
+        "confidence": int(confidence),
+        "setup": setup,
+        "entry": _fmt_level(entry),
+        "stop_loss": _fmt_level(sl_price),
+        "take_profit": [_fmt_level(tp_price)] if tp_price is not None else [],
+        "support_levels": [str(_fmt_level(x)) for x in supports_below[:4]],
+        "resistance_levels": [str(_fmt_level(x)) for x in resists_above[:4]],
+        "position_size": _fmt_level(position_size) if position_size is not None else None,
+        "risk": str(risk_fraction),
+        "invalidation": "BOS invalidated (price closes back across the broken swing).",
+        "issues": issues,
+        "rationale": rationale,
+        "news": {
+            "mode": "auto" if bool(news_context) else "not_provided",
+            "impact": "UNKNOWN",
+            "summary": news_summary,
+            "key_points": [],
+        },
+        "explanation": "Mechanical engine output (EMA10/EMA18 + BOS + ATR buffer).",
+    }
+
+
+# -----------------------------
 # OpenAI: chart analysis (v2.6 PRO, English output)
 # -----------------------------
 def analyze_with_openai_pro(
@@ -1141,9 +1519,10 @@ def analyze():
     db.commit()
 
     try:
-        result = analyze_with_openai_pro(
-            image_bytes=image_bytes,
-            image_mime=image_mime,
+        # NOTE: Engine switched to deterministic mechanical logic.
+        # We keep the chart upload flow unchanged (for UI consistency), but the
+        # decision-making comes from OHLC market data, not the screenshot.
+        result = analyze_with_mechanical_engine(
             pair=pair,
             timeframe=timeframe,
             capital=capital,
