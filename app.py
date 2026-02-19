@@ -27,6 +27,7 @@ from flask import (
 )
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
+from engine.screen_engine import analyze_screen
 
 # -----------------------------
 # Config
@@ -1601,16 +1602,13 @@ def analyze():
     db.commit()
 
     try:
-        # NOTE: Engine switched to deterministic mechanical logic.
-        # We keep the chart upload flow unchanged (for UI consistency), but the
-        # decision-making comes from OHLC market data, not the screenshot.
-        result = analyze_with_mechanical_engine(
+        result = analyze_screen(
+            image_bytes=image_bytes,
             pair=pair,
             timeframe=timeframe,
             capital=capital,
             risk_fraction=risk_fraction,
             mode=mode,
-            news_context=news_context,
         )
     except Exception as e:
         flash(f"Analysis failed: {e}", "error")
