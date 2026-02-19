@@ -5,25 +5,6 @@ import json
 import os
 import re
 import sqlite3
-import math
-
-# Optional deps for screenshot-based mechanical fallback (NOT required for Binance OHLC engine)
-try:
-    import cv2  # type: ignore
-except Exception:
-    cv2 = None
-
-try:
-    import numpy as np  # type: ignore
-except Exception:
-    np = None
-
-from PIL import Image
-
-try:
-    import pytesseract  # type: ignore
-except Exception:
-    pytesseract = None
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -558,849 +539,6 @@ def auto_news_context(pair: str, timeframe: str = "") -> str:
 
 
 # -----------------------------
-# Mechanical engine (deterministic, OHLC-based)
-# -----------------------------
-
-_BINANCE_INTERVAL_MAP = {
-    "1M": "1m",
-    "3M": "3m",
-    "5M": "5m",
-    "15M": "15m",
-    "30M": "30m",
-    "1H": "1h",
-    "2H": "2h",
-    "4H": "4h",
-    "6H": "6h",
-    "8H": "8h",
-    "12H": "12h",
-    "1D": "1d",
-    "3D": "3d",
-    "1W": "1w",
-}
-
-
-def _binance_interval(tf: str) -> str:
-    tf = (tf or "").upper().strip()
-    return _BINANCE_INTERVAL_MAP.get(tf, "1h")
-
-
-def _fetch_binance_klines(symbol: str, timeframe: str, limit: int = 300):
-    """Fetch klines from Binance spot public API (best-effort)."""
-    interval = _binance_interval(timeframe)
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={int(limit)}"
-    req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    raw = urlopen(req, timeout=10).read().decode("utf-8")
-    data = json.loads(raw)
-    if not isinstance(data, list) or not data:
-        raise RuntimeError("Binance returned empty klines.")
-
-    # kline: [open_time, open, high, low, close, volume, close_time, ...]
-    o = [float(x[1]) for x in data]
-    h = [float(x[2]) for x in data]
-    l = [float(x[3]) for x in data]
-    c = [float(x[4]) for x in data]
-    return o, h, l, c
-
-
-def _ema(values: list[float], period: int) -> list[float]:
-    if not values:
-        return []
-    if period <= 1:
-        return values[:]
-    k = 2 / (period + 1)
-    out = [float(values[0])]
-    for i in range(1, len(values)):
-        out.append(float(values[i]) * k + out[-1] * (1 - k))
-    return out
-
-
-def _atr(high: list[float], low: list[float], close: list[float], period: int = 14) -> list[float]:
-    if len(close) < 2:
-        return [0.0 for _ in close]
-    tr = [0.0]
-    for i in range(1, len(close)):
-        tr_i = max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1]),
-        )
-        tr.append(float(tr_i))
-    return _ema(tr, period)
-
-
-def _swing_points(high: list[float], low: list[float], left: int = 2, right: int = 2):
-    """Simple fractal swings."""
-    sh: list[tuple[int, float]] = []
-    sl: list[tuple[int, float]] = []
-    n = len(high)
-    if n < left + right + 5:
-        return sh, sl
-    for i in range(left, n - right):
-        hh = high[i]
-        ll = low[i]
-        if all(hh > high[i - k] for k in range(1, left + 1)) and all(
-            hh > high[i + k] for k in range(1, right + 1)
-        ):
-            sh.append((i, float(hh)))
-        if all(ll < low[i - k] for k in range(1, left + 1)) and all(
-            ll < low[i + k] for k in range(1, right + 1)
-        ):
-            sl.append((i, float(ll)))
-    return sh, sl
-
-
-def _fmt_level(x: Optional[float]) -> Optional[str]:
-    if x is None:
-        return None
-    if abs(x - round(x)) < 1e-8:
-        return str(int(round(x)))
-    return f"{x:.8f}".rstrip("0").rstrip(".")
-
-
-def _safe_no_trade(
-    pair: str,
-    timeframe: str,
-    mode_norm: str,
-    risk_fraction: float,
-    reason: str,
-    issues: Optional[list[str]] = None,
-    rationale: Optional[list[str]] = None,
-    confidence: int = 25,
-    supports: Optional[list[float]] = None,
-    resistances: Optional[list[float]] = None,
-    news_context: str = "",
-) -> dict:
-    sup = [str(_fmt_level(x)) for x in (supports or []) if x is not None][:4]
-    res = [str(_fmt_level(x)) for x in (resistances or []) if x is not None][:4]
-    news_summary = (news_context or "")[:500]
-    return {
-        "pair": pair,
-        "timeframe": timeframe,
-        "mode": "SCALP" if mode_norm == "scalp" else "SWING",
-        "is_chart": True,
-        "signal": "NO_TRADE",
-        "confidence": int(max(0, min(100, confidence))),
-        "setup": reason,
-        "entry": None,
-        "stop_loss": None,
-        "take_profit": [],
-        "support_levels": sup,
-        "resistance_levels": res,
-        "position_size": None,
-        "risk": str(risk_fraction),
-        "invalidation": "N/A",
-        "issues": issues or [],
-        "rationale": rationale or [],
-        "news": {
-            "mode": "auto" if bool(news_context) else "not_provided",
-            "impact": "UNKNOWN",
-            "summary": news_summary,
-            "key_points": [],
-        },
-        "explanation": "Mechanical engine output (deterministic).",
-    }
-
-
-
-def analyze_with_image_mechanical_engine(
-    image_bytes: bytes,
-    image_mime: str | None,
-    pair: str,
-    timeframe: str,
-    capital: float,
-    risk_fraction: float,
-    mode: str,
-    news_context: str = "",
-    binance_error: str = "",
-) -> dict:
-    # Dependency guard: many hosts (e.g., Render on Py3.13) may not ship OpenCV/OCR wheels by default.
-    if cv2 is None or np is None or pytesseract is None:
-        missing = [name for name,val in [('cv2',cv2),('numpy',np),('pytesseract',pytesseract)] if val is None]
-        mode_norm = (mode or '').strip().lower()
-        if mode_norm not in ('scalp','swing'):
-            mode_norm = 'swing'
-        return {
-            'pair': pair,
-            'timeframe': timeframe,
-            'mode': mode_norm.upper(),
-            'is_chart': True,
-            'signal': 'NO_TRADE',
-            'confidence': 20,
-            'setup': 'Screenshot engine unavailable (missing optional dependencies).',
-            'entry': None,
-            'stop_loss': None,
-            'take_profit': [],
-            'support_levels': [],
-            'resistance_levels': [],
-            'position_size': None,
-            'risk': f'{risk_fraction}',
-            'invalidation': 'N/A',
-            'issues': [f"Missing optional deps: {', '.join(missing)}"],
-            'rationale': [
-                'This deployment does not include OpenCV/OCR dependencies.',
-                'For crypto pairs listed on Binance, the OHLC mechanical engine still works without these deps.',
-            ],
-            'news': {'mode': 'auto' if bool(news_context) else 'not_provided', 'impact': 'UNKNOWN', 'summary': news_context or '', 'key_points': []},
-            'explanation': 'NO_TRADE: screenshot engine unavailable.',
-        }
-
-    """
-    Deterministic, screenshot-based engine (NO prompts):
-    - Detects manually drawn trendlines/horizontal S/R (usually blue) via color mask + Hough.
-    - Uses OCR on right axis to build pixel->price mapping (linear).
-    - Triggers:
-        SHORT: break below rising trendline + retest from below
-        LONG:  break above falling trendline + retest from above
-    If scale cannot be inferred, returns NO_TRADE (rather than guessing).
-    """
-
-    mode_norm = (mode or "").strip().lower()
-    if mode_norm not in ("scalp", "swing"):
-        mode_norm = "swing"
-
-    # -------- Load image
-    np_img = np.frombuffer(image_bytes, dtype=np.uint8)
-    bgr = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
-    if bgr is None:
-        return _safe_no_trade(
-            pair, timeframe, mode_norm, risk_fraction,
-            "NO_TRADE: unreadable screenshot.",
-            issues=["cv2.imdecode returned None."],
-            confidence=15,
-            news_context=news_context,
-        )
-
-    h_img, w_img = bgr.shape[:2]
-
-    # -------- OCR: extract numeric labels with bounding boxes
-    # We whitelist digits and separators to reduce noise.
-    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    pil = Image.fromarray(rgb)
-
-    ocr = pytesseract.image_to_data(
-        pil,
-        output_type=pytesseract.Output.DICT,
-        config="--psm 6 -c tessedit_char_whitelist=0123456789.,",
-    )
-
-    nums = []
-    for i, txt in enumerate(ocr.get("text", [])):
-        t = (txt or "").strip()
-        if not t:
-            continue
-        t2 = t.replace(",", ".")
-        if re.fullmatch(r"\d{1,6}\.\d{1,3}", t2) or re.fullmatch(r"\d{2,6}", t2):
-            try:
-                val = float(t2)
-            except Exception:
-                continue
-            x = int(ocr["left"][i]); y = int(ocr["top"][i])
-            w = int(ocr["width"][i]); hh = int(ocr["height"][i])
-            conf = float(ocr.get("conf", ["-1"])[i] or -1)
-            nums.append({"val": val, "x": x, "y": y, "w": w, "h": hh, "conf": conf})
-
-    if not nums:
-        return _safe_no_trade(
-            pair, timeframe, mode_norm, risk_fraction,
-            "NO_TRADE: OCR found no price labels.",
-            issues=[f"Binance error: {binance_error}"] if binance_error else [],
-            confidence=18,
-            news_context=news_context,
-        )
-
-    # -------- Build price scale from right-axis labels (x in rightmost 20%)
-    right_candidates = [n for n in nums if n["x"] > int(w_img * 0.78) and n["conf"] >= 30]
-    # If OCR confidence is weak, fall back to all right-side candidates.
-    if len(right_candidates) < 2:
-        right_candidates = [n for n in nums if n["x"] > int(w_img * 0.75)]
-
-    # De-duplicate similar values by rounding (axis often repeats)
-    uniq = {}
-    for n in right_candidates:
-        key = round(n["val"], 2)
-        # keep the one with highest conf
-        if key not in uniq or n["conf"] > uniq[key]["conf"]:
-            uniq[key] = n
-    axis = sorted(list(uniq.values()), key=lambda z: z["y"])
-
-    if len(axis) < 2:
-        return _safe_no_trade(
-            pair, timeframe, mode_norm, risk_fraction,
-            "NO_TRADE: could not infer price scale from screenshot.",
-            issues=["Need at least two readable axis labels for pixel->price mapping."],
-            confidence=20,
-            news_context=news_context,
-        )
-
-    # Fit linear mapping price = a*y + b using least squares on (y_center, price)
-    ys = np.array([a["y"] + a["h"] / 2 for a in axis], dtype=np.float64)
-    ps = np.array([a["val"] for a in axis], dtype=np.float64)
-    A = np.vstack([ys, np.ones_like(ys)]).T
-    a, b = np.linalg.lstsq(A, ps, rcond=None)[0]  # price ≈ a*y + b
-
-    def y_to_price(y: float) -> float:
-        return float(a * y + b)
-
-    def price_to_y(p: float) -> float:
-        if abs(a) < 1e-9:
-            return float(h_img / 2)
-        return float((p - b) / a)
-
-    # Current price estimate:
-    # Prefer large, high-confidence numbers that are NOT on the axis (usually the last price label).
-    non_axis = [n for n in nums if n["x"] < int(w_img * 0.78)]
-    non_axis = sorted(non_axis, key=lambda z: (-(z["conf"]), -(z["w"] * z["h"])))
-    current_price = non_axis[0]["val"] if non_axis else axis[len(axis)//2]["val"]
-
-    # -------- Detect blue lines (trendline + horizontal levels)
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-
-    # Typical platform drawings are cyan/blue. We use a broad range.
-    lower = np.array([80, 40, 40])
-    upper = np.array([140, 255, 255])
-    mask = cv2.inRange(hsv, lower, upper)
-
-    # Clean mask
-    kernel = np.ones((3, 3), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel, iterations=1)
-
-    edges = cv2.Canny(mask, 50, 150)
-    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=60, minLineLength=int(w_img * 0.15), maxLineGap=12)
-
-    if lines is None or len(lines) == 0:
-        return _safe_no_trade(
-            pair, timeframe, mode_norm, risk_fraction,
-            "NO_TRADE: no drawn levels detected (trendline/SR).",
-            issues=["No blue lines detected by Hough transform."],
-            confidence=22,
-            news_context=news_context,
-        )
-
-    # Classify lines
-    trend_candidates = []
-    horiz_candidates = []
-    for (x1, y1, x2, y2) in lines[:, 0]:
-        dx = x2 - x1
-        dy = y2 - y1
-        if dx == 0:
-            continue
-        slope = dy / dx
-        length = math.hypot(dx, dy)
-        angle = abs(math.degrees(math.atan2(dy, dx)))
-        # near horizontal
-        if angle < 10:
-            horiz_candidates.append((length, x1, y1, x2, y2, slope))
-        # trend-ish (not too steep, not too flat)
-        elif 10 <= angle <= 70:
-            trend_candidates.append((length, x1, y1, x2, y2, slope))
-
-    trend_candidates.sort(reverse=True, key=lambda t: t[0])
-    horiz_candidates.sort(reverse=True, key=lambda t: t[0])
-
-    if not trend_candidates:
-        return _safe_no_trade(
-            pair, timeframe, mode_norm, risk_fraction,
-            "NO_TRADE: no trendline detected.",
-            issues=["Only horizontal lines detected."],
-            confidence=25,
-            news_context=news_context,
-        )
-
-    # Pick the longest trendline
-    _, x1, y1, x2, y2, slope = trend_candidates[0]
-    # Ensure x1 < x2
-    if x2 < x1:
-        x1, x2 = x2, x1
-        y1, y2 = y2, y1
-        slope = (y2 - y1) / (x2 - x1)
-
-    # Line equation y = m*x + c
-    m = (y2 - y1) / (x2 - x1)
-    c = y1 - m * x1
-
-    def line_y(x: float) -> float:
-        return float(m * x + c)
-
-    # Determine chart area heuristically: exclude left sidebar if present (platform UI)
-    # We focus on central-right area.
-    x_left = int(w_img * 0.20)
-    x_right = int(w_img * 0.95)
-    y_top = int(h_img * 0.08)
-    y_bot = int(h_img * 0.92)
-
-    # Extract "price pixels" (candles): red/green regions
-    hsv2 = hsv
-    # green candles
-    green = cv2.inRange(hsv2, np.array([35, 40, 40]), np.array([90, 255, 255]))
-    # red candles (wrap)
-    red1 = cv2.inRange(hsv2, np.array([0, 50, 50]), np.array([12, 255, 255]))
-    red2 = cv2.inRange(hsv2, np.array([165, 50, 50]), np.array([180, 255, 255]))
-    red = cv2.bitwise_or(red1, red2)
-    price_mask = cv2.bitwise_or(red, green)
-
-    roi = price_mask[y_top:y_bot, x_left:x_right]
-
-    # For each x column in the last part of chart, estimate "price trace" y as median of candle pixels
-    # We look at last 18% of width inside ROI.
-    roi_h, roi_w = roi.shape[:2]
-    x_start = int(roi_w * 0.82)
-    cols = []
-    for xx in range(x_start, roi_w):
-        ys_col = np.where(roi[:, xx] > 0)[0]
-        if ys_col.size == 0:
-            continue
-        cols.append((xx, float(np.median(ys_col))))
-
-    if len(cols) < 30:
-        return _safe_no_trade(
-            pair, timeframe, mode_norm, risk_fraction,
-            "NO_TRADE: cannot read candles reliably from screenshot.",
-            issues=["Too few candle pixels detected in last part of chart."],
-            confidence=22,
-            news_context=news_context,
-        )
-
-    # Convert ROI coordinates back to image coordinates
-    pts = [(x_left + xx, y_top + yy) for xx, yy in cols]
-
-    # Compute relation to trendline
-    diffs = []
-    touches = 0
-    for x, y in pts:
-        ly = line_y(x)
-        diffs.append(y - ly)  # positive => below line (since y grows downward)
-        if abs(y - ly) < 6:  # ~6 px touch tolerance
-            touches += 1
-
-    below_ratio = sum(1 for d in diffs if d > 3) / len(diffs)
-    above_ratio = sum(1 for d in diffs if d < -3) / len(diffs)
-
-    # Retest detection: look back a bit (previous 25% of the sampled columns) for touches on opposite side
-    lookback = diffs[: int(len(diffs) * 0.35)]
-    recent = diffs[int(len(diffs) * 0.65):]
-
-    retest_from_below = (sum(1 for d in lookback if abs(d) < 6) >= 3) and (below_ratio > 0.65)
-    retest_from_above = (sum(1 for d in lookback if abs(d) < 6) >= 3) and (above_ratio > 0.65)
-
-    # Determine direction based on slope sign and break+retest
-    rr_min = 1.2 if mode_norm == "scalp" else 2.0
-    buffer_pct = 0.0015 if mode_norm == "scalp" else 0.0025
-
-    # Horizontal levels (take top 4)
-    sr_levels = []
-    for length, hx1, hy1, hx2, hy2, _s in horiz_candidates[:8]:
-        y_mid = (hy1 + hy2) / 2
-        p = y_to_price(y_mid)
-        sr_levels.append(p)
-    # Dedup close levels
-    sr_levels_sorted = sorted(sr_levels)
-    dedup = []
-    for p in sr_levels_sorted:
-        if not dedup or abs(p - dedup[-1]) > max(0.0005 * abs(p), 0.5):
-            dedup.append(p)
-    # Split into supports/resistances vs current_price
-    supports = sorted([p for p in dedup if p < current_price], reverse=True)[:4]
-    resistances = sorted([p for p in dedup if p > current_price])[:4]
-
-    # Trendline price at right edge (for SL anchor)
-    tl_price_now = y_to_price(line_y(x_right))
-
-    if slope > 0 and retest_from_below:
-        # Rising trendline broken -> SHORT
-        entry = current_price
-        sl = tl_price_now * (1 + buffer_pct)
-        R = sl - entry
-        if R <= 0:
-            return _safe_no_trade(
-                pair, timeframe, mode_norm, risk_fraction,
-                "NO_TRADE: invalid geometry (SHORT).",
-                issues=["SL not above entry (scale/OCR mismatch)."],
-                supports=supports,
-                resistances=resistances,
-                confidence=30,
-                news_context=news_context,
-            )
-        tp_rr = entry - rr_min * R
-        tp = min(tp_rr, supports[0]) if supports else tp_rr
-
-        # sizing
-        stop_distance = abs(entry - sl)
-        risk_amount = capital * risk_fraction
-        notional = (risk_amount / stop_distance) if stop_distance else 0.0
-        notional = min(notional, capital * 8)
-
-        return {
-            "pair": pair,
-            "timeframe": timeframe,
-            "mode": "SCALP" if mode_norm == "scalp" else "SWING",
-            "is_chart": True,
-            "signal": "SHORT",
-            "confidence": 66 if mode_norm == "swing" else 60,
-            "setup": "Trendline break + retest (SHORT).",
-            "entry": str(_fmt_level(entry)),
-            "stop_loss": str(_fmt_level(sl)),
-            "take_profit": [str(_fmt_level(tp))],
-            "support_levels": [str(_fmt_level(x)) for x in supports],
-            "resistance_levels": [str(_fmt_level(x)) for x in resistances],
-            "position_size": str(round(notional, 2)) if notional else None,
-            "risk": str(risk_fraction),
-            "invalidation": "Price reclaims broken trendline (close above it).",
-            "issues": [],
-            "rationale": [
-                "Detected manually drawn rising trendline (blue).",
-                "Price action is predominantly below the trendline on the right edge (break).",
-                "Prior touches near the line suggest a retest from below.",
-                "SL anchored above trendline with a small buffer; TP by RR and nearest support if found.",
-            ],
-            "news": {
-                "mode": "auto" if bool(news_context) else "not_provided",
-                "impact": "UNKNOWN",
-                "summary": (news_context or "")[:500],
-                "key_points": [],
-            },
-            "explanation": "Screenshot-based mechanical engine (OpenCV+OCR, deterministic).",
-        }
-
-    if slope < 0 and retest_from_above:
-        # Falling trendline broken -> LONG
-        entry = current_price
-        sl = tl_price_now * (1 - buffer_pct)
-        R = entry - sl
-        if R <= 0:
-            return _safe_no_trade(
-                pair, timeframe, mode_norm, risk_fraction,
-                "NO_TRADE: invalid geometry (LONG).",
-                issues=["SL not below entry (scale/OCR mismatch)."],
-                supports=supports,
-                resistances=resistances,
-                confidence=30,
-                news_context=news_context,
-            )
-        tp_rr = entry + rr_min * R
-        tp = max(tp_rr, resistances[0]) if resistances else tp_rr
-
-        stop_distance = abs(entry - sl)
-        risk_amount = capital * risk_fraction
-        notional = (risk_amount / stop_distance) if stop_distance else 0.0
-        notional = min(notional, capital * 8)
-
-        return {
-            "pair": pair,
-            "timeframe": timeframe,
-            "mode": "SCALP" if mode_norm == "scalp" else "SWING",
-            "is_chart": True,
-            "signal": "LONG",
-            "confidence": 66 if mode_norm == "swing" else 60,
-            "setup": "Trendline break + retest (LONG).",
-            "entry": str(_fmt_level(entry)),
-            "stop_loss": str(_fmt_level(sl)),
-            "take_profit": [str(_fmt_level(tp))],
-            "support_levels": [str(_fmt_level(x)) for x in supports],
-            "resistance_levels": [str(_fmt_level(x)) for x in resistances],
-            "position_size": str(round(notional, 2)) if notional else None,
-            "risk": str(risk_fraction),
-            "invalidation": "Price loses reclaimed trendline (close below it).",
-            "issues": [],
-            "rationale": [
-                "Detected manually drawn falling trendline (blue).",
-                "Price action is predominantly above the trendline on the right edge (break).",
-                "Prior touches near the line suggest a retest from above.",
-                "SL anchored below trendline with a small buffer; TP by RR and nearest resistance if found.",
-            ],
-            "news": {
-                "mode": "auto" if bool(news_context) else "not_provided",
-                "impact": "UNKNOWN",
-                "summary": (news_context or "")[:500],
-                "key_points": [],
-            },
-            "explanation": "Screenshot-based mechanical engine (OpenCV+OCR, deterministic).",
-        }
-
-    # Otherwise: not a clean break+retest
-    why = []
-    why.append(f"slope={'up' if slope>0 else 'down'}")
-    why.append(f"below_ratio={below_ratio:.2f}, above_ratio={above_ratio:.2f}, touches={touches}")
-    why.append(f"retest_from_below={retest_from_below}, retest_from_above={retest_from_above}")
-
-    return _safe_no_trade(
-        pair,
-        timeframe,
-        mode_norm,
-        risk_fraction,
-        "NO_TRADE: no clean trendline break+retest.",
-        issues=why,
-        confidence=38,
-        supports=supports,
-        resistances=resistances,
-        news_context=news_context,
-    )
-
-
-def analyze_with_mechanical_engine(
-    pair: str,
-    timeframe: str,
-    capital: float,
-    risk_fraction: float,
-    mode: str,
-    news_context: str = "",
-    image_bytes: bytes | None = None,
-    image_mime: str | None = None,
-) -> dict:
-    """Deterministic signal: EMA10/EMA18 + BOS on fractal swings + ATR buffer."""
-
-    mode_norm = (mode or "").strip().lower()
-    if mode_norm not in ("scalp", "swing"):
-        mode_norm = "swing"
-
-    try:
-        _o, h, l, c = _fetch_binance_klines(pair, timeframe, limit=300)
-    except Exception as e:
-        # Fallback: if the symbol is not available on Binance (e.g. GOLD, indices, CFDs),
-        # run a deterministic, image-based engine (no prompts) using OpenCV + OCR.
-        if image_bytes:
-            try:
-                return analyze_with_image_mechanical_engine(
-                    image_bytes=image_bytes,
-                    image_mime=image_mime,
-                    pair=pair,
-                    timeframe=timeframe,
-                    capital=capital,
-                    risk_fraction=risk_fraction,
-                    mode=mode_norm,
-                    news_context=news_context,
-                    binance_error=str(e),
-                )
-            except Exception as ie:
-                return _safe_no_trade(
-                    pair=pair,
-                    timeframe=timeframe,
-                    mode_norm=mode_norm,
-                    risk_fraction=risk_fraction,
-                    reason="NO_TRADE: market data unavailable.",
-                    issues=[f"Binance klines error: {e}", f"Image fallback error: {ie}"],
-                    rationale=["Mechanical engine requires OHLC data or a readable screenshot."],
-                    confidence=20,
-                    news_context=news_context,
-                )
-        return _safe_no_trade(
-            pair=pair,
-            timeframe=timeframe,
-            mode_norm=mode_norm,
-            risk_fraction=risk_fraction,
-            reason="NO_TRADE: market data unavailable.",
-            issues=[f"Binance klines error: {e}"],
-            rationale=["Mechanical engine requires OHLC data."],
-            confidence=20,
-            news_context=news_context,
-        )
-
-    if len(c) < 60:
-        return _safe_no_trade(
-            pair,
-            timeframe,
-            mode_norm,
-            risk_fraction,
-            "NO_TRADE: not enough candles.",
-            issues=["Less than 60 candles returned."],
-            confidence=22,
-            news_context=news_context,
-        )
-
-    ema_fast = _ema(c, 10)
-    ema_slow = _ema(c, 18)
-    atr14 = _atr(h, l, c, 14)
-
-    sh, sl = _swing_points(h, l, left=2, right=2)
-
-    last_close = float(c[-1])
-    last_atr = float(atr14[-1] or 0.0)
-    buffer_abs = max(last_atr * 0.20, last_close * (0.0012 if mode_norm == "scalp" else 0.0020))
-
-    swing_highs = [p for _i, p in sh]
-    swing_lows = [p for _i, p in sl]
-    supports_below = sorted([p for p in swing_lows if p < last_close], reverse=True)
-    resists_above = sorted([p for p in swing_highs if p > last_close])
-
-    if len(sh) < 3 or len(sl) < 3:
-        return _safe_no_trade(
-            pair,
-            timeframe,
-            mode_norm,
-            risk_fraction,
-            "NO_TRADE: insufficient market structure (swings).",
-            issues=["Not enough swing highs/lows for BOS logic."],
-            rationale=["Wait until clearer swing structure forms."],
-            confidence=28,
-            supports=supports_below[:4],
-            resistances=resists_above[:4],
-            news_context=news_context,
-        )
-
-    last_swing_high = float(sh[-1][1])
-    last_swing_low = float(sl[-1][1])
-
-    trend_up = ema_fast[-1] > ema_slow[-1]
-    trend_down = ema_fast[-1] < ema_slow[-1]
-
-    bos_long = last_close > last_swing_high
-    bos_short = last_close < last_swing_low
-
-    rr_min = 1.2 if mode_norm == "scalp" else 2.2
-
-    issues: list[str] = []
-    atr_frac = (last_atr / last_close) if last_close else 0.0
-    if mode_norm == "swing" and atr_frac < 0.002:
-        issues.append("ATR too small: low volatility / tight range.")
-    if mode_norm == "scalp" and atr_frac < 0.0008:
-        issues.append("ATR too small: scalp edge likely poor.")
-
-    if not ((trend_up and bos_long and supports_below) or (trend_down and bos_short and resists_above)):
-        rationale = [
-            "No-trade because strict conditions were not met.",
-            "Mechanical rules require BOTH: (1) trend alignment (EMA10 vs EMA18) and (2) BOS on structure.",
-            f"trend_up={trend_up}, trend_down={trend_down}, bos_long={bos_long}, bos_short={bos_short}",
-        ]
-        return _safe_no_trade(
-            pair,
-            timeframe,
-            mode_norm,
-            risk_fraction,
-            "NO_TRADE: no trend+BOS alignment.",
-            issues=issues,
-            rationale=rationale,
-            confidence=33,
-            supports=supports_below[:4],
-            resistances=resists_above[:4],
-            news_context=news_context,
-        )
-
-    if trend_up and bos_long and supports_below:
-        signal = "LONG"
-        entry = last_close
-        sl_struct = float(supports_below[0])
-        sl_price = sl_struct - buffer_abs
-        R = entry - sl_price
-        if R <= 0:
-            return _safe_no_trade(
-                pair,
-                timeframe,
-                mode_norm,
-                risk_fraction,
-                "NO_TRADE: invalid risk geometry (LONG).",
-                issues=["Computed SL is not below entry."],
-                supports=supports_below[:4],
-                resistances=resists_above[:4],
-                news_context=news_context,
-            )
-        tp_rr = entry + rr_min * R
-        tp_struct = float(resists_above[0]) if resists_above else None
-        tp_price = max(tp_rr, tp_struct) if tp_struct is not None else tp_rr
-        confidence = 64 if mode_norm == "swing" else 58
-        setup = "EMA10>EMA18 + BOS above swing-high."
-        rationale = [
-            "Trend filter: EMA10 above EMA18.",
-            "Trigger: close broke above most recent swing-high (BOS).",
-            "SL beyond nearest swing-low/support with ATR buffer.",
-            "TP respects minimum RR and nearest resistance if present.",
-        ]
-
-    else:
-        signal = "SHORT"
-        entry = last_close
-        sl_struct = float(resists_above[0])
-        sl_price = sl_struct + buffer_abs
-        R = sl_price - entry
-        if R <= 0:
-            return _safe_no_trade(
-                pair,
-                timeframe,
-                mode_norm,
-                risk_fraction,
-                "NO_TRADE: invalid risk geometry (SHORT).",
-                issues=["Computed SL is not above entry."],
-                supports=supports_below[:4],
-                resistances=resists_above[:4],
-                news_context=news_context,
-            )
-        tp_rr = entry - rr_min * R
-        tp_struct = float(supports_below[0]) if supports_below else None
-        tp_price = min(tp_rr, tp_struct) if tp_struct is not None else tp_rr
-        confidence = 64 if mode_norm == "swing" else 58
-        setup = "EMA10<EMA18 + BOS below swing-low."
-        rationale = [
-            "Trend filter: EMA10 below EMA18.",
-            "Trigger: close broke below most recent swing-low (BOS).",
-            "SL beyond nearest swing-high/resistance with ATR buffer.",
-            "TP respects minimum RR and nearest support if present.",
-        ]
-
-    if signal == "LONG" and sl_price >= entry:
-        return _safe_no_trade(
-            pair,
-            timeframe,
-            mode_norm,
-            risk_fraction,
-            "NO_TRADE: inconsistent levels (LONG).",
-            issues=["SL not below entry."],
-            supports=supports_below[:4],
-            resistances=resists_above[:4],
-            news_context=news_context,
-        )
-    if signal == "SHORT" and sl_price <= entry:
-        return _safe_no_trade(
-            pair,
-            timeframe,
-            mode_norm,
-            risk_fraction,
-            "NO_TRADE: inconsistent levels (SHORT).",
-            issues=["SL not above entry."],
-            supports=supports_below[:4],
-            resistances=resists_above[:4],
-            news_context=news_context,
-        )
-
-    position_size = None
-    stop_distance = abs(entry - sl_price)
-    if stop_distance > 0:
-        risk_amount = float(capital) * float(risk_fraction)
-        notional = risk_amount / stop_distance
-        max_notional = float(capital) * 8
-        notional = min(notional, max_notional)
-        if notional > 0:
-            position_size = notional
-
-    news_summary = (news_context or "")[:500]
-
-    return {
-        "pair": pair,
-        "timeframe": timeframe,
-        "mode": "SCALP" if mode_norm == "scalp" else "SWING",
-        "is_chart": True,
-        "signal": signal,
-        "confidence": int(confidence),
-        "setup": setup,
-        "entry": _fmt_level(entry),
-        "stop_loss": _fmt_level(sl_price),
-        "take_profit": [_fmt_level(tp_price)] if tp_price is not None else [],
-        "support_levels": [str(_fmt_level(x)) for x in supports_below[:4]],
-        "resistance_levels": [str(_fmt_level(x)) for x in resists_above[:4]],
-        "position_size": _fmt_level(position_size) if position_size is not None else None,
-        "risk": str(risk_fraction),
-        "invalidation": "BOS invalidated (price closes back across the broken swing).",
-        "issues": issues,
-        "rationale": rationale,
-        "news": {
-            "mode": "auto" if bool(news_context) else "not_provided",
-            "impact": "UNKNOWN",
-            "summary": news_summary,
-            "key_points": [],
-        },
-        "explanation": "Mechanical engine output (EMA10/EMA18 + BOS + ATR buffer).",
-    }
-
-
-# -----------------------------
 # OpenAI: chart analysis (v2.6 PRO, English output)
 # -----------------------------
 def analyze_with_openai_pro(
@@ -1486,46 +624,71 @@ def analyze_with_openai_pro(
     }
 
     instruction = f"""
-You are a professional trading analyst.
+You are a rule-based trading engine. You MUST behave mechanically and consistently.
+
+TOP PRIORITY (in order):
+1) Swing highs/lows (HH/HL/LH/LL) and STRUCTURE (BOS/CHoCH).
+2) Meaningful Support/Resistance from major swings and consolidations.
+3) Classic breakout + return (break-and-retest) at those levels:
+   - Break of resistance then retest from above -> LONG continuation.
+   - Break of support then retest from below -> SHORT continuation.
+   - Trendline break + retest counts ONLY if the trendline is clearly respected (2–3 touches).
+4) Liquidity concepts (equal highs/lows, obvious stop pools) to place SL beyond them.
+5) Candle patterns ONLY as confirmation at a level/retest (do NOT use candles without context):
+   - Engulfing (bull/bear), Pin bar / hammer / shooting star, Inside bar break, Morning/Evening star.
+6) News awareness: if high-impact macro is near, the trade still must exist but should be LOW-RISK (wider SL buffer, conservative TP).
 
 Task:
-1) First decide whether the image contains a readable price chart screenshot. Set is_chart=false if it is NOT a chart, or if prices/timeframe are not readable.
-2) If is_chart=true, you MUST return a direction: LONG or SHORT.
-   - NO_TRADE is allowed ONLY if the image is not a readable price chart (candles/price scale/timeframe not readable).
-   - If the edge is weak or structure is messy, do NOT output NO_TRADE. Instead produce a LOW-EDGE trade using the nearest support/resistance.
+A) First decide whether the image contains a readable price chart screenshot.
+   - Set is_chart=false ONLY if it is not a chart OR price scale is not readable.
+B) If is_chart=true, you MUST return a direction: LONG or SHORT (never NO_TRADE).
+   - If edge is weak/unclear, still return a trade, but make it a "STRUCTURE-BASED LOW-EDGE" plan using nearest strong S/R.
 
-Support/Resistance rule (MANDATORY):
-- IMPORTANT: levels must be MEANINGFUL (swing highs/lows, consolidation boundaries). Do NOT use tiny micro-levels a few dollars away.
-- IMPORTANT: nearest resistance/support should normally be at least ~1% away from current price for SWING, unless the chart is very tight-range.
+LEVELS (MANDATORY):
+- Extract 2–4 nearest SUPPORT levels below current price and 2–4 nearest RESISTANCE levels above current price.
+- Levels MUST be meaningful: major swing highs/lows, range boundaries, consolidation edges.
+- Ignore tiny micro-levels very close to price unless the chart is clearly tight-range (scalp).
 
-- Extract 2–4 nearest SUPPORT levels below current price and 2–4 nearest RESISTANCE levels above current price visible on the chart.
-- Populate support_levels and resistance_levels with those prices (strings like "1975" or "1975.5").
-- If signal=LONG:
-  * Entry: near current price or near nearest support (tight range allowed)
-  * Stop-loss: below the nearest support (not just under a local wick; beyond liquidity) with a small buffer
-  * Take-profit: at the nearest resistance above entry (first clear resistance)
-- If signal=SHORT:
-  * Entry: near current price or near nearest resistance
-  * Stop-loss: above the nearest resistance with a small buffer
-  * Take-profit: at the nearest support below entry (first clear support)
+ENTRY LOGIC (MANDATORY):
+- Do NOT default to "market now".
+- Prefer LIMIT-style entries at the nearest logical retest point:
+  * LONG: entry near (a) reclaimed resistance retest, or (b) nearest support in an up-structure.
+  * SHORT: entry near (a) broken support retest from below, or (b) nearest resistance in a down-structure.
+- If the chart shows a clean break-and-retest (your main setup), base the entry on that retest level.
+
+STOP-LOSS (MANDATORY):
+- Place SL beyond the nearest protective structure:
+  * LONG: below the nearest meaningful support / last swing low / liquidity pool (not under a tiny wick).
+  * SHORT: above the nearest meaningful resistance / last swing high / liquidity pool.
+- Use a small buffer.
+
+TAKE-PROFIT (MANDATORY):
+- TP1 must be the nearest opposing meaningful level:
+  * LONG: nearest resistance above entry.
+  * SHORT: nearest support below entry.
+- If multiple levels exist, choose the first clear one.
 
 Context:
 - Pair: {pair}
 - Timeframe: {timeframe}
-- Mode: {mode_norm.upper()} (SCALP = tighter SL/TP, quicker invalidation; SWING = wider structure-based levels)
+- Mode: {mode_norm.upper()} (SCALP = tighter levels; SWING = wider structure-based)
 - Capital: {capital}
 - Risk per trade: {risk_fraction} (fraction of capital, e.g. 0.02 = 2%)
 
-News (best-effort, may be empty):
+News context (best-effort, may be empty):
 {news_context or ""}
 
 Output rules:
 - Return ONLY JSON matching the schema (no markdown).
-- Avoid NO_TRADE unless the image is not a readable price chart.
-- If LONG/SHORT, ALWAYS provide concrete entry/SL/TP and ensure TP is the nearest opposing level (TP at nearest resistance for LONG / nearest support for SHORT) and SL is beyond the nearest protective level with a small buffer.
-- Always fill support_levels and resistance_levels (2–4 each) based on visible chart levels.
-- If LONG/SHORT, provide concrete entry/SL/TP levels (numbers or tight ranges) and a clear invalidation.
-- Provide 6–12 short bullet points in rationale (structure, levels, liquidity/price action, and the biggest risk).
+- If is_chart=true, signal MUST be LONG or SHORT.
+- Always fill support_levels and resistance_levels (2–4 each).
+- Always provide concrete entry/SL/TP and a clear invalidation.
+- In rationale, explicitly mention:
+  (1) the swing structure (HH/HL/LH/LL, BOS/CHoCH),
+  (2) the key S/R levels used,
+  (3) whether there is a break-and-retest,
+  (4) any candle confirmation,
+  (5) the biggest risk (including news/volatility).
 """
 
     resp = client.responses.create(
@@ -1592,19 +755,7 @@ Output rules:
         if not isinstance(result.get("rationale"), list):
             result["rationale"] = [str(result.get("rationale") or "")]
 
-    # Must have entry + SL
-    if result.get("entry") is None or result.get("stop_loss") is None:
-        _force_no_trade("NO_TRADE: missing entry or stop-loss.")
-        return result
-
-    entry_n = _first_number(result.get("entry"))
-    sl_n = _first_number(result.get("stop_loss"))
-    tps = result.get("take_profit") or []
-    if not isinstance(tps, list):
-        tps = []
-    tp0_n = _first_number(tps[0]) if tps else None
-
-    # Parse support/resistance levels (strings -> floats)
+    # Parse support/resistance early (used to enforce structure-first planning)
     def _parse_levels(vals):
         out_levels = []
         if not isinstance(vals, list):
@@ -1613,12 +764,42 @@ Output rules:
             n = _first_number(v)
             if n is not None:
                 out_levels.append(float(n))
-        # de-dup and sort
-        out_levels = sorted(set(out_levels))
-        return out_levels
+        return sorted(set(out_levels))
 
     supports = _parse_levels(result.get("support_levels") or [])
     resistances = _parse_levels(result.get("resistance_levels") or [])
+    # Must have entry + SL (product rule: if is_chart=true, still return a trade plan)
+    if result.get("entry") is None:
+        # Approximate current price from nearest surrounding levels if possible.
+        if supports and resistances:
+            approx_px = (max(supports) + min(resistances)) / 2.0
+        elif supports:
+            approx_px = supports[-1] * 1.01
+        elif resistances:
+            approx_px = resistances[0] * 0.99
+        else:
+            approx_px = None
+        if approx_px is not None:
+            result["entry"] = str(round(approx_px, 4))
+
+    # Normalize numbers after potential synthesis
+    entry_n = _first_number(result.get("entry"))
+    sl_n = _first_number(result.get("stop_loss"))
+
+    # If still missing entry, treat as unreadable chart (rare)
+    if entry_n is None:
+        _force_no_trade("NO_TRADE: missing entry and cannot infer price.")
+        return result
+
+    tps = result.get("take_profit") or []
+    if not isinstance(tps, list):
+        tps = []
+    tp0_n = _first_number(tps[0]) if tps else None
+    tps = result.get("take_profit") or []
+    if not isinstance(tps, list):
+        tps = []
+    tp0_n = _first_number(tps[0]) if tps else None
+
 
     def _nearest_below(levels, x):
         below = [lv for lv in levels if lv < x]
@@ -2003,18 +1184,15 @@ def analyze():
     db.commit()
 
     try:
-        # NOTE: Engine switched to deterministic mechanical logic.
-        # We keep the chart upload flow unchanged (for UI consistency), but the
-        # decision-making comes from OHLC market data, not the screenshot.
-        result = analyze_with_mechanical_engine(
+        result = analyze_with_openai_pro(
+            image_bytes=image_bytes,
+            image_mime=image_mime,
             pair=pair,
             timeframe=timeframe,
             capital=capital,
             risk_fraction=risk_fraction,
             mode=mode,
             news_context=news_context,
-            image_bytes=image_bytes,
-            image_mime=image_mime,
         )
     except Exception as e:
         flash(f"Analysis failed: {e}", "error")
