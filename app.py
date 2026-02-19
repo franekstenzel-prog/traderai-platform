@@ -810,55 +810,55 @@ Output rules:
             sig = "LONG" if (entry_n - ns) <= (nr - entry_n) else "SHORT"
         result["signal"] = sig
 
-    
-    # ---------------------------------------------------------
-    # NEW TRADE ENGINE (RR enforced, logical TP/SL)
-    # ---------------------------------------------------------
-    buffer_pct = 0.0025
-    rr_min = 2.2 if mode_norm == "swing" else 1.2
+    # Enforce "TP at nearest opposing level" and "SL beyond nearest protective level"
+    if entry_n is not None and sl_n is not None:
+        buffer_abs = max(entry_n * 0.0015, entry_n * 0.0005)
 
-    if sig in ("LONG", "SHORT") and entry_n is not None:
+        # Minimum TP distance to avoid micro 'noise' levels
+        min_tp_dist_frac = 0.005 if mode_norm == "scalp" else 0.015  # 0.5% scalp, 1.5% swing
+  # ~0.15% buffer (min 0.05%)
+
         if sig == "LONG":
-            nearest_support = max([s for s in supports if s < entry_n], default=None)
-            nearest_res = min([r for r in resistances if r > entry_n], default=None)
+            ns = _nearest_below(supports, entry_n)
+            nr = _pick_tp_above(resistances, entry_n, min_tp_dist_frac)
+            # Override TP to meaningful resistance (avoid micro levels)
+            if nr is not None:
+                result["take_profit"] = [_fmt_level(nr)]
+                tp0_n = nr
+            # Override SL to below nearest support if available
+            if ns is not None:
+                sl_new = ns - buffer_abs
+                if sl_new < entry_n:
+                    result["stop_loss"] = _fmt_level(sl_new)
+                    sl_n = sl_new
 
-            if nearest_support:
-                sl_n = nearest_support * (1 - buffer_pct)
+        elif sig == "SHORT":
+            nr = _nearest_above(resistances, entry_n)
+            ns = _nearest_below(supports, entry_n)
+            if ns is not None:
+                # pick meaningful TP (avoid micro levels)
+                tp_sel = _pick_tp_below(supports, entry_n, min_tp_dist_frac)
+                if tp_sel is not None:
+                    result["take_profit"] = [_fmt_level(tp_sel)]
+                    tp0_n = tp_sel
+            if nr is not None:
+                sl_new = nr + buffer_abs
+                if sl_new > entry_n:
+                    result["stop_loss"] = _fmt_level(sl_new)
+                    sl_n = sl_new
 
-            if sl_n and sl_n < entry_n:
-                R = entry_n - sl_n
-                tp_rr = entry_n + rr_min * R
-                tp_final = max(tp_rr, nearest_res) if nearest_res else tp_rr
+    # Ensure support_levels/resistance_levels exist as lists of strings
+    if not isinstance(result.get("support_levels"), list):
+        result["support_levels"] = []
+    if not isinstance(result.get("resistance_levels"), list):
+        result["resistance_levels"] = []
+    result["support_levels"] = [str(x) for x in (result.get("support_levels") or []) if str(x).strip()]
+    result["resistance_levels"] = [str(x) for x in (result.get("resistance_levels") or []) if str(x).strip()]
 
-                result["stop_loss"] = str(round(sl_n, 2))
-                result["take_profit"] = [str(round(tp_final, 2))]
-
-        if sig == "SHORT":
-            nearest_res = min([r for r in resistances if r > entry_n], default=None)
-            nearest_support = max([s for s in supports if s < entry_n], default=None)
-
-            if nearest_res:
-                sl_n = nearest_res * (1 + buffer_pct)
-
-            if sl_n and sl_n > entry_n:
-                R = sl_n - entry_n
-                tp_rr = entry_n - rr_min * R
-                tp_final = min(tp_rr, nearest_support) if nearest_support else tp_rr
-
-                result["stop_loss"] = str(round(sl_n, 2))
-                result["take_profit"] = [str(round(tp_final, 2))]
-
-        sl_n = _first_number(result.get("stop_loss"))
-        if entry_n and sl_n:
-            stop_distance = abs(entry_n - sl_n)
-            if stop_distance > 0:
-                risk_amount = capital * risk_fraction
-                notional = risk_amount / stop_distance
-                max_notional = capital * 8
-                notional = min(notional, max_notional)
-                result["position_size"] = str(round(notional, 2))
-
-    return result
+    if sig == "LONG" and entry_n is not None and sl_n is not None:
+        if sl_n >= entry_n:
+            _force_no_trade("NO_TRADE: inconsistent levels (for LONG, SL must be below entry).")
+            return result
         if tp0_n is not None and tp0_n <= entry_n:
             _force_no_trade("NO_TRADE: inconsistent levels (for LONG, TP must be above entry).")
             return result
