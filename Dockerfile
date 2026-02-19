@@ -18,4 +18,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
 
-CMD ["gunicorn", "-b", "0.0.0.0:${PORT}", "app:app", "--workers", "2", "--threads", "4"]
+CMD ["sh", "-c", "gunicorn -b 0.0.0.0:${PORT} app:app --workers 2 --threads 4"]
+
+
